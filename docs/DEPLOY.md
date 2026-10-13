@@ -1,0 +1,60 @@
+# 部署与正式开店
+
+现在的 Sites 地址是店主私人体验站，不是公开营业站。正式站建议部署到你自己的 Cloudflare 账户并绑定域名。仓库提供 Cloudflare Worker 部署方式，不能当普通静态文件直接拖入 Pages。
+
+## Windows 快速部署
+
+1. 安装 Node.js 24（包含 npm）。
+2. 在 GitHub 仓库点击 Code → Download ZIP，解压到一个普通文件夹。
+3. 双击 `deploy-windows.cmd`。
+4. 按弹出的 Cloudflare 登录页面授权，脚本会安装依赖、构建、创建或复用数据库、应用迁移并发布 Worker。
+5. 完成后继续配置下方两个密钥，再打开网站 `/admin` 创建店主。
+
+遇到错误时脚本会停住并保留提示，不会声称部署成功。此轮未在真实 Windows 电脑或用户 Cloudflare 账户实测。
+
+也可以点击 README 中的 Deploy to Cloudflare 按钮，按 Cloudflare 的账户向导填写绑定；首次新建站点使用全新数据库。
+
+## 两个必须配置的机密
+
+在 Cloudflare Worker 的 Settings → Variables and Secrets 中添加：
+
+| 名称 | 用途 |
+| --- | --- |
+| `INVENTORY_KEY` | 恰好 64 位十六进制随机字符串，用于加密库存。导入库存后不能随意更换。 |
+| `BOOTSTRAP_TOKEN` | 首次建立店主账号的一次性随机令牌。 |
+
+可分别运行 `node scripts/generate-secret.mjs` 生成两个不同值。请放入密码管理器保管；不要提交到 GitHub。
+
+然后访问 `/admin`，输入初始化令牌，建立账号和至少 12 位密码。成功后删除 Cloudflare 中的 `BOOTSTRAP_TOKEN`。
+
+## 正式模式
+
+`wrangler.json` 默认 `DEMO_MODE=false`；新数据库没有示例商品或默认管理员。先建分类、商品、导入真实可交付库存，再按 [PAYMENTS.md](PAYMENTS.md) 配置收款。不要把演示数据库直接改成正式库：演示管理员、测试订单和示例商品需要隔离。
+
+自有 Cloudflare 配置包含每分钟执行的 Cron，用于未付款库存过期清理和已配置通道的支付巡检。部署后检查触发日志。Sites 私人体验地址不保证采用仓库的 Cron，访问目录、订单和后台也会清理过期库存。
+
+## 命令行部署
+
+```bash
+npm run install:ci
+npm run build
+node scripts/deploy-cloudflare.mjs --login
+```
+
+脚本会更新本地 `wrangler.json` 的数据库 ID，请确认对应自己的账户。`.openai/hosting.json` 只用于 Sites 体验站，不能代替 Cloudflare 数据库配置。
+
+## 开发及数据库备份
+
+本地开发使用独立 `.dev.vars`，复制 `.dev.vars.example` 后填写自己的本地值。该文件被 Git 忽略。使用 `npm run dev` 前，依次应用数据库迁移：
+
+```bash
+node node_modules/wrangler/bin/wrangler.js d1 migrations apply DB --local --config wrangler.json --persist-to .wrangler/state
+```
+
+正式升级前，在自己的安全环境中导出数据库：
+
+```bash
+node node_modules/wrangler/bin/wrangler.js d1 export DB --remote --config wrangler.json --output backup.sql
+```
+
+备份包含客户数据、账号哈希和加密库存，不应上传到公开仓库。数据库备份与库存加密密钥要分别安全保管。恢复演练请在独立数据库进行；不要未经核对向正式库导入 SQL。本轮未执行实际账户备份或恢复。
