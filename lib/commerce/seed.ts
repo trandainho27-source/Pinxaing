@@ -1,20 +1,12 @@
-// Demonstration merchandise. No real licenses, accounts or customer data.
-export const categorySeed = [
-    ['ai', 'AI 与效率', 'sparkles'], ['software', '软件与工具', 'code'],
-    ['digital', '设计与素材', 'file'], ['learning', '学习与指南', 'globe'],
-    ['workspace', '工作空间', 'box'], ['service', '专业服务', 'headphones']
-];
+export const categorySeed = [['px-home','居家生活','home'],['px-daily','随身好物','bag'],['px-desk','桌面与办公','desk'],['px-outdoor','户外出行','outdoor']];
+// [id, category, name, subtitle, icon, price (CNY cents)] — demonstration only.
 export const productSeed = [
-    ['ai-starter', 'ai', 'AI 创作工作流手册', '从灵感到成稿，让创作更有条理', '效率指南', '全球', 2900, 0, '热门推荐'],
-    ['design-kit', 'digital', '品牌视觉设计素材包', '海报 · 社交媒体 · 品牌提案', '设计资源', '全球', 3900, 0, '热门推荐'],
-    ['notion-kit', 'workspace', 'Notion 项目管理模板', '任务、进度和团队知识，一处管理', '工作模板', '全球', 1900, 0, '热门推荐'],
-    ['dev-license', 'software', '开发者效率工具包', '代码片段与自动化工作流', '开发工具', '全球', 9900, 0, '精选工具'],
-    ['office-key', 'software', '办公效率进阶工具', '表格处理 · 文档整理 · 任务管理', '效率工具', '中国', 4900, 0, '精选工具'],
-    ['ai-team', 'ai', '团队 AI 协作指南', '业务场景、知识整理与协作规范', '团队效率', '全球', 6900, 0, '团队精选'],
-    ['photo-presets', 'digital', '生活影像调色预设', '自然光影与日常记录的色彩灵感', '影像资源', '全球', 1900, 0, '灵感精选'],
-    ['icon-library', 'digital', '极简界面图标合集', '统一的视觉语言，轻松完成设计', '界面素材', '全球', 2900, 0, '设计精选'],
-    ['starter-guide', 'learning', '独立创作者入门指南', '把想法整理成可以交付的作品', '学习指南', '中国', 990, 0, '入门之选'],
-    ['focus-space', 'workspace', '个人成长计划模板', '目标拆解、习惯跟踪和每周复盘', '生活模板', '全球', 1290, 0, '轻松开始'],
-    ['business-kit', 'learning', '小团队经营文档包', '需求、项目交付与客户沟通模板', '经营资源', '中国', 5900, 0, '团队精选'],
-    ['support', 'service', '工具配置指导服务', '一对一预约 · 配置与使用指导', '服务预约码', '中国', 9900, 0, '专业支持']
+ ['px-mug','px-home','简约陶瓷马克杯','温润手感 · 350 mL · 米白色','cup',3900],
+ ['px-bottle','px-daily','轻量随行保温杯','日常随行 · 500 mL · 浅沙色','bottle',6900],
+ ['px-bag','px-daily','日常帆布托特包','大容量 · 加厚帆布 · 自然原色','bag',5900],
+ ['px-lamp','px-home','暖光桌面阅读灯','柔和光线 · 三档调节 · 暖白色','lamp',12900],
+ ['px-notebook','px-desk','留白线装笔记本','A5 尺寸 · 96 页 · 点阵内页','notebook',2900],
+ ['px-organizer','px-desk','桌面分格收纳盒','让桌面更有序 · 多格收纳','desk',4900],
+ ['px-umbrella','px-outdoor','轻便折叠晴雨伞','便携收纳 · 晴雨两用 · 墨绿色','umbrella',7900],
+ ['px-cup','px-outdoor','户外不锈钢水杯','轻巧耐用 · 露营与日常适用','outdoor',3900]
 ];

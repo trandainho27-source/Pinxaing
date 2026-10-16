@@ -1,0 +1,8 @@
+'use client';
+import {useState} from 'react';
+import {Send,ShieldCheck} from 'lucide-react';
+import {date} from '@/lib/commerce/client';
+export default function GiftsPanel({data,busy,save}: {data:any;busy:boolean;save:(path:string,payload:any)=>Promise<boolean>}){
+ const [codes,setCodes]=useState('');
+ return <div className="gift-admin"><div className="gift-stats"><div className="panel"><small>可赠送账号</small><strong>{data.stats.available}</strong></div><div className="panel"><small>已随单赠送</small><strong>{data.stats.assigned}</strong></div></div><div className="inventory-layout"><form className="panel inventory-import" onSubmit={async e=>{e.preventDefault();if(await save('gifts',{codes}))setCodes('');}}><h3><Send size={19}/>导入 Telegram 赠送账号</h3><p>每行一个账号，最多 30 个。竖线前填写唯一账号标识，后面填写登录信息及使用说明。</p><label>账号内容<textarea required rows={8} value={codes} onChange={e=>setCodes(e.target.value)} placeholder="账号标识 | 登录信息 | 使用说明"/></label><div className="info-box"><ShieldCheck size={17}/>加密保存，不回显明文；同一账号标识自动去重。</div>{data.demo&&<p className="hint">当前为演示环境，请只导入测试内容。</p>}<button className="primary" disabled={busy||!codes.trim()}>加密导入赠送账号</button></form><section className="panel table-panel"><div className="panel-title"><h3>最近导入与分配记录</h3></div><p className="gift-import-note">每单赠送一个。已展示给客户的账号不会在取消订单后重新分配；无账号库存时暂停新下单。</p><div className="table-scroll"><table><thead><tr><th>状态</th><th>关联订单</th><th>分配 / 导入时间</th></tr></thead><tbody>{data.recent.map((g:any)=><tr key={g.id}><td><span className={'status '+(g.status==='assigned'?'fulfilled':'available')}>{g.status==='assigned'?'已赠送':'可赠送'}</span></td><td className="mono">{g.order_id||'—'}</td><td>{date(g.assigned_at||g.created_at)}</td></tr>)}</tbody></table></div></section></div></div>;
+}

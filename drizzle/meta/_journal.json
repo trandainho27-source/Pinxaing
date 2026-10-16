@@ -43,6 +43,13 @@
       "when": 1791857175405,
       "tag": "0005_serious_sharon_carter",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792133409797,
+      "tag": "0006_early_bedlam",
+      "breakpoints": true
     }
   ]
 }

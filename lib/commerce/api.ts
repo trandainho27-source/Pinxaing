@@ -1,217 +1,108 @@
-import type { RuntimeEnv, Staff, Product, Order } from './types.ts';
-import { uid, randomToken, sha, safeEqual, hashPassword, verifyPassword, encrypt, decrypt, hmac } from './security.ts';
-import { categorySeed, productSeed } from './seed.ts';
-import { PaymentError, paymentConfiguration } from './tron.ts';
-import { createInvoice, invoiceForOrder, checkTransaction, reconcilePayments, paymentDashboard } from './payments.ts';
-import { SupplierError, supplierDashboard, supplierAccount, syncSupplier, quoteSupplier, purchaseSupplier } from './supplier.ts';
-class ApiError extends Error {
-    constructor(public status: number, message: string) {
-        super(message);
+import type { RuntimeEnv, Product, Order, Staff } from './types.ts';
+import {uid,randomToken,sha,safeEqual,hashPassword,verifyPassword,encrypt,decrypt} from './security.ts';
+import {ApiError,fail,now,json,str,integer,body,database,stmt,all,first,audit,limit,authenticated,loginSession} from './api-common.ts';
+import {categorySeed,productSeed} from './seed.ts';
+import {paymentMethods,reservedPayment,type PaymentMethod} from './payment-providers.ts';
+import {lookup as lookupHistoricalOrder} from './legacy-api.ts';
+export const SHIPPING_FEE = 2000;
+const GIFT_CONTEXT = 'pinxiang-telegram-gift';
+const categoryQuery = `SELECT c.* FROM categories c WHERE NOT EXISTS(SELECT 1 FROM products p WHERE p.category_id=c.id AND p.product_type='digital') OR EXISTS(SELECT 1 FROM products p WHERE p.category_id=c.id AND p.product_type='physical') ORDER BY c.sort`;
+const productQuery = `SELECT p.*,coalesce(s.available,0) AS stock,coalesce(s.reserved,0) AS reserved,coalesce(s.sold,0) AS sold FROM products p LEFT JOIN physical_stock s ON s.product_id=p.id`;
+function guard(db:D1Database, condition:string, ...args:any[]) {
+    const id=uid();return [stmt(db,`INSERT INTO transaction_guards(id,passed) SELECT ?,CASE WHEN ${condition} THEN 1 ELSE 0 END`,id,...args),stmt(db,'DELETE FROM transaction_guards WHERE id=?',id)];
+}
+function releaseStock(db:D1Database) {
+    return [stmt(db,`UPDATE physical_stock SET available=available+(SELECT coalesce(sum(r.quantity),0) FROM physical_reservations r JOIN orders o ON o.id=r.order_id WHERE r.product_id=physical_stock.product_id AND r.status='reserved' AND o.status IN('expired','cancelled')),reserved=reserved-(SELECT coalesce(sum(r.quantity),0) FROM physical_reservations r JOIN orders o ON o.id=r.order_id WHERE r.product_id=physical_stock.product_id AND r.status='reserved' AND o.status IN('expired','cancelled'))`),
+    stmt(db,`UPDATE physical_reservations SET status='released' WHERE status='reserved' AND order_id IN(SELECT id FROM orders WHERE status IN('expired','cancelled'))`)];
+}
+async function expire(db:D1Database) {
+    await db.batch([stmt(db,"UPDATE orders SET status='expired' WHERE status='pending' AND expires_at<?",now()),...releaseStock(db),stmt(db,"UPDATE inventory SET status='available',order_id=NULL WHERE status='reserved' AND order_id IN(SELECT id FROM orders WHERE status IN('expired','cancelled'))"),stmt(db,'DELETE FROM sessions WHERE expires_at<?',now()),stmt(db,'DELETE FROM rate_limits WHERE reset_at<?',now())]);
+}
+async function settings(db:D1Database) {return Object.fromEntries((await all(db,'SELECT * FROM settings')).map(x=>[x.key,x.value]));}
+async function seed(db:D1Database,env:RuntimeEnv,actor:string) {
+    if(env.DEMO_MODE!=='true')fail(403,'正式环境不能导入演示内容');
+    if(!env.INVENTORY_KEY)fail(503,'赠送账号加密密钥未配置');
+    if(await first(db,"SELECT key FROM settings WHERE key='physical_demo_seeded'"))return {ok:true};
+    const st:D1PreparedStatement[]=[],ts=now();
+    categorySeed.forEach(([id,name,icon],i)=>st.push(stmt(db,'INSERT OR IGNORE INTO categories VALUES(?,?,?,?,1)',id,name,icon,i)));
+    for(const [id,category,name,subtitle,icon,price] of productSeed){
+        st.push(stmt(db,`INSERT OR IGNORE INTO products(id,category_id,name,subtitle,description,instructions,price,compare_price,min_qty,max_qty,featured,active,region,tag,is_example,created_at,product_type,icon_key) VALUES(?,?,?,?,?,?,?,0,1,20,1,1,'中国','生活精选',1,?,'physical',?)`,id,category,name,subtitle,'这是用于演示的实体商品，不会产生真实配送。正式经营时请替换成你的真实商品、材质、尺寸和图片。','每单固定邮费 ¥20，不可取消。收货地址及联系方式可留空，下单后可通过赠送的 Telegram 账号联系客服补充。',price,ts,icon));
+        st.push(stmt(db,'INSERT OR IGNORE INTO physical_stock(product_id,available,reserved,sold) VALUES(?,20,0,0)',id));
     }
-}
-function fail(status: number, message: string): never {
-    throw new ApiError(status, message);
-}
-const now = () => Date.now();
-const json = (data: unknown, status = 200, headers: Record<string, string> = {}) => Response.json(data, { status, headers: { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers } });
-const str = (v: unknown, max = 500) => typeof v === 'string' ? v.trim().slice(0, max) : '';
-const integer = (v: unknown, min: number, max: number) => {
-    if (typeof v !== 'number' || !Number.isInteger(v) || v < min || v > max)
-        fail(400, '数字超出允许范围');
-    return v as number;
-};
-async function body(request: Request): Promise<Record<string, any>> {
-    const raw = await request.text();
-    if (raw.length > 150000)
-        fail(413, '提交内容过大');
-    try {
-        const parsed = JSON.parse(raw);
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
-            return fail(400, '提交格式无效');
-        return parsed as Record<string, any>;
+    for(let n=1;n<=30;n++){
+        const content=`DEMO-TELEGRAM-${String(n).padStart(3,'0')} | 仅用于界面演示，不能登录 Telegram`;
+        st.push(stmt(db,`INSERT OR IGNORE INTO telegram_gifts(id,ciphertext,fingerprint,status,is_example,created_at) VALUES(?,?,?,'available',1,?)`,uid(),await encrypt(content,env.INVENTORY_KEY!,GIFT_CONTEXT),await sha('demo-gift-'+n),ts));
     }
-    catch {
-        fail(400, '提交格式无效');
-    }
+    const defaults={brand:'品享',tagline:'精选日常好物，让生活多一点喜欢。',announcement:'实体商品自助下单，每单固定邮费 ¥20；地址和联系方式可留空，下单赠 Telegram 客服及售后通讯账号。',support:'可使用订单中的 Telegram 赠送账号联系客服，或提交售后工单。',telegramSupport:'',businessHours:'工作日 09:00–18:00',footer:'日常好物，自助选购',terms:'本商城售卖实体商品。每笔订单固定收取 20 元邮费，不可取消。地址和联系方式可留空，发货前请通过客服补充。每单赠送一个 Telegram 通讯账号用于联系客服和售后。已展示的赠送账号不会因取消订单而回收。退款与退换货请联系商家。',privacy:'收货地址和联系方式均可选填，仅用于订单配送与售后。订单密钥用于访问订单和赠送账号，请妥善保存。'};
+    const oldDefaults:Record<string,string>={tagline:'好工具，好灵感，好好享受数字生活。',announcement:'欢迎体验品享。这是独立演示商城，示例商品用于体验购买与交付，不收取真实款项。',footer:'数字商品交付平台',terms:'购买前请确认商品说明、适用地区及使用条件。数字商品交付后，如有质量问题请凭订单号提交售后工单。',support:'请通过订单页面提交售后工单',privacy:'仅收集履行订单必需的联系信息。查询密钥用于验证订单访问权限。联系信息仅供客服处理订单使用。'};
+    for(const [key,value] of Object.entries(defaults))st.push(stmt(db,`INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE settings.value=?`,key,value,oldDefaults[key]??value));
+    st.push(stmt(db,"INSERT OR IGNORE INTO settings VALUES('physical_demo_seeded','1')"),audit(db,actor,'physical.demo.seed','catalog'));
+    await db.batch(st);return {ok:true};
 }
-function database(env: RuntimeEnv) {
-    if (!env.DB)
-        fail(503, '数据库未配置，请完成 Cloudflare 部署');
-    return env.DB!;
+async function catalog(db:D1Database,env:RuntimeEnv){
+    if(env.DEMO_MODE==='true')await seed(db,env,'system');await expire(db);
+    return {products:await all(db,productQuery+` WHERE p.product_type='physical' AND p.active=1 ${env.DEMO_MODE==='true'?'':'AND p.is_example=0'} AND p.category_id IN(SELECT id FROM categories WHERE active=1) ORDER BY p.featured DESC,p.created_at DESC`),categories:await all(db,`SELECT * FROM categories c WHERE c.active=1 AND EXISTS(SELECT 1 FROM products p WHERE p.category_id=c.id AND p.product_type='physical' AND p.active=1 ${env.DEMO_MODE==='true'?'':'AND p.is_example=0'}) ORDER BY c.sort`),settings:await settings(db),demo:env.DEMO_MODE==='true',paymentEnabled:false,paymentMethods,shippingFee:SHIPPING_FEE,giftAvailable:!!await first(db,"SELECT id FROM telegram_gifts WHERE status='available' AND is_example=? LIMIT 1",env.DEMO_MODE==='true'?1:0)};
 }
-const stmt = (db: D1Database, sql: string, ...values: any[]) => db.prepare(sql).bind(...values);
-async function all<T = any>(db: D1Database, sql: string, ...values: any[]) {
-    return (await stmt(db, sql, ...values).all<T>()).results;
+async function lookup(db:D1Database,env:RuntimeEnv,id:string,secret:string):Promise<any>{
+    const row=await first<any>(db,'SELECT * FROM orders WHERE id=? AND ready=1',id);
+    if(!row || !safeEqual(await sha(secret),row.lookup_hash))fail(404,'订单号或查询密钥不正确');
+    if(row.order_type!=='physical')return lookupHistoricalOrder(db,env,id,secret);
+    const {lookup_hash,checkout_hash,checkout_payload_hash,...order}=row;
+    const gift=await first<any>(db,'SELECT ciphertext FROM telegram_gifts WHERE order_id=?',id);
+    return {...order,items:await all(db,'SELECT product_id,product_name,price,quantity FROM order_items WHERE order_id=?',id),tickets:await all(db,'SELECT * FROM tickets WHERE order_id=? ORDER BY created_at DESC',id),telegram_gift:gift?await decrypt(gift.ciphertext,env.INVENTORY_KEY!,GIFT_CONTEXT):null};
 }
-async function first<T = any>(db: D1Database, sql: string, ...values: any[]) {
-    return stmt(db, sql, ...values).first<T>();
+export function reservationGuard(db:D1Database,orderId:string){
+    return guard(db,`EXISTS(SELECT 1 FROM orders o WHERE o.id=? AND o.order_type='physical' AND o.status='pending' AND o.shipping_fee=2000 AND o.total=o.subtotal+2000
+        AND o.subtotal=(SELECT sum(price*quantity) FROM order_items WHERE order_id=o.id)
+        AND EXISTS(SELECT 1 FROM telegram_gifts WHERE order_id=o.id AND status='assigned')
+        AND NOT EXISTS(SELECT 1 FROM order_items i JOIN products p ON p.id=i.product_id JOIN categories c ON c.id=p.category_id WHERE i.order_id=o.id AND (p.active!=1 OR c.active!=1 OR p.product_type!='physical' OR p.price!=i.price OR i.quantity<p.min_qty OR i.quantity>p.max_qty
+            OR NOT EXISTS(SELECT 1 FROM physical_stock s WHERE s.product_id=p.id)
+            OR NOT EXISTS(SELECT 1 FROM physical_reservations r WHERE r.order_id=o.id AND r.product_id=p.id AND r.quantity=i.quantity AND r.status='reserved'))))`,orderId);
 }
-function audit(db: D1Database, actor: string, action: string, target: string, detail = '') {
-    return stmt(db, 'INSERT INTO audits VALUES(?,?,?,?,?,?)', uid(), actor, action, target, detail, now());
+export async function settleOrder(db:D1Database,id:string,actor:string,reason:string,provider:string,reference:string,amount?:number){
+    const order=await first<any>(db,"SELECT * FROM orders WHERE id=? AND order_type='physical'",id);if(!order)fail(404,'实体订单不存在');
+    if(amount!==undefined && amount!==order.total)fail(400,'付款金额必须包含商品金额及固定 20 元邮费');
+    if(['paid','fulfilled'].includes(order.status)){if(order.payment_ref!==reference||order.payment_provider!==provider)fail(409,'订单已有其他付款记录');return {ok:true,idempotent:true};}
+    if(order.status!=='pending'||order.expires_at<=now())fail(409,'订单已关闭或过期');
+    try{await db.batch([
+        stmt(db,"UPDATE orders SET status='paid',paid_at=?,payment_provider=?,payment_ref=? WHERE id=? AND status='pending' AND expires_at>?",now(),provider,reference,id,now()),
+        stmt(db,`UPDATE physical_stock SET reserved=reserved-(SELECT r.quantity FROM physical_reservations r WHERE r.product_id=physical_stock.product_id AND r.order_id=? AND r.status='reserved'),sold=sold+(SELECT r.quantity FROM physical_reservations r WHERE r.product_id=physical_stock.product_id AND r.order_id=? AND r.status='reserved') WHERE product_id IN(SELECT product_id FROM physical_reservations WHERE order_id=? AND status='reserved') AND EXISTS(SELECT 1 FROM orders WHERE id=? AND status='paid' AND payment_ref=? AND payment_provider=?)`,id,id,id,id,reference,provider),
+        stmt(db,"UPDATE physical_reservations SET status='committed' WHERE order_id=? AND status='reserved' AND EXISTS(SELECT 1 FROM orders WHERE id=? AND status='paid' AND payment_ref=? AND payment_provider=?)",id,id,reference,provider),
+        ...guard(db,`EXISTS(SELECT 1 FROM orders o WHERE o.id=? AND o.status='paid' AND o.payment_ref=? AND o.payment_provider=? AND NOT EXISTS(SELECT 1 FROM order_items i WHERE i.order_id=o.id AND NOT EXISTS(SELECT 1 FROM physical_reservations r WHERE r.order_id=o.id AND r.product_id=i.product_id AND r.quantity=i.quantity AND r.status='committed')))`,id,reference,provider),audit(db,actor,'order.paid',id,reason)
+    ]);}catch{fail(409,'付款记录或库存状态冲突，请刷新核对');}
+    return {ok:true};
 }
-async function limit(db: D1Database, request: Request, action: string, max: number) {
-    const ip = request.headers.get('cf-connecting-ip') || 'local';
-    const bucket = Math.floor(now() / 60000);
-    const key = await sha(`${action}:${ip}:${bucket}`);
-    const result = await stmt(db, 'INSERT INTO rate_limits(key,count,reset_at) VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET count=count+1 RETURNING count', key, now() + 120000).first<{
-        count: number;
-    }>();
-    if (result!.count > max)
-        fail(429, '操作太频繁，请稍后再试');
+async function createOrder(db:D1Database,env:RuntimeEnv,b:any){
+    if(!Array.isArray(b.items)||!b.items.length||b.items.length>12)fail(400,'请选择 1–12 种商品');
+    if(b.acceptedTerms!==true)fail(400,'请同意购买协议');
+    const contact=str(b.contact,100),address=str(b.shipping_address,500),recipient=str(b.recipient,60),method=str(b.payment_method,20)||'wechat';
+    if(!paymentMethods.some(p=>p.id===method))fail(400,'请选择微信、支付宝或 USDT');
+    const secret=b.checkoutToken===undefined?randomToken():str(b.checkoutToken,128);if(!/^[a-f0-9]{64}$/.test(secret))fail(400,'下单凭证格式无效');
+    const hash=await sha(secret),combined=new Map<string,number>();
+    for(const item of b.items){if(!item||typeof item!=='object')fail(400,'商品格式无效');const id=str(item.id,64),q=integer(item.quantity,1,100);combined.set(id,(combined.get(id)||0)+q);}
+    const payloadHash=await sha(JSON.stringify({contact,address,recipient,method,items:[...combined].sort((a,b)=>a[0].localeCompare(b[0]))}));
+    const replay=async()=>{const existing=await first<any>(db,'SELECT id,checkout_payload_hash FROM orders WHERE checkout_hash=?',hash);if(!existing)return null;if(existing.checkout_payload_hash!==payloadHash)fail(409,'同一下单凭证不能用于不同订单');return {...await lookup(db,env,existing.id,secret),secret,idempotent:true};};
+    const prior=await replay();if(prior)return prior;
+    const lines:{p:Product;q:number}[]=[];
+    for(const [id,q] of combined){const p=await first<Product>(db,productQuery+` WHERE p.id=? AND p.product_type='physical' AND p.active=1 AND p.category_id IN(SELECT id FROM categories WHERE active=1)`,id);if(!p)fail(400,'商品不存在或已下架');if(p!.is_example&&env.DEMO_MODE!=='true')fail(400,'示例商品不能用于正式交易');if(q<p!.min_qty||q>p!.max_qty||q>p!.stock)fail(409,`${p!.name} 库存不足或数量超限`);lines.push({p:p!,q});}
+    if(!await first(db,"SELECT id FROM telegram_gifts WHERE status='available' AND is_example=? LIMIT 1",env.DEMO_MODE==='true'?1:0))fail(409,'赠送 Telegram 账号暂时缺货，请稍后再下单');
+    if(!env.INVENTORY_KEY)fail(503,'赠送账号加密配置尚未完成');
+    const subtotal=lines.reduce((n,l)=>n+l.p.price*l.q,0),total=subtotal+SHIPPING_FEE,id='PX'+new Date().toISOString().slice(0,10).replaceAll('-','')+randomToken().slice(0,12).toUpperCase(),ts=now();
+    const st=[stmt(db,`INSERT INTO orders(id,lookup_hash,contact,total,status,ready,demo,created_at,expires_at,order_type,subtotal,shipping_fee,recipient,shipping_address,payment_method,checkout_hash,checkout_payload_hash) VALUES(?,?,?,?,'pending',0,?,?,?,'physical',?,?,?,?,?,?,?)`,id,hash,contact,total,env.DEMO_MODE==='true'?1:0,ts,ts+30*60000,subtotal,SHIPPING_FEE,recipient,address,method,hash,payloadHash)];
+    for(const {p,q} of lines){st.push(stmt(db,'INSERT INTO order_items VALUES(?,?,?,?,?,?)',uid(),id,p.id,p.name,p.price,q),stmt(db,'UPDATE physical_stock SET available=available-?,reserved=reserved+? WHERE product_id=?',q,q,p.id),stmt(db,"INSERT INTO physical_reservations VALUES(?,?,?,?,'reserved')",uid(),id,p.id,q));}
+    st.push(stmt(db,`UPDATE telegram_gifts SET status='assigned',order_id=?,assigned_at=? WHERE id=(SELECT id FROM telegram_gifts WHERE status='available' AND is_example=? ORDER BY created_at,id LIMIT 1)`,id,ts,env.DEMO_MODE==='true'?1:0),...reservationGuard(db,id),stmt(db,'UPDATE orders SET ready=1 WHERE id=?',id));
+    try{await db.batch(st);}catch{const duplicate=await replay();if(duplicate)return duplicate;fail(409,'商品或赠送账号库存发生变化，请刷新后重试');}
+    return {...await lookup(db,env,id,secret),secret};
 }
-async function expire(db: D1Database) {
-    const ts = now();
-    await db.batch([stmt(db, "UPDATE orders SET status='expired' WHERE status='pending' AND expires_at<?", ts), stmt(db, "UPDATE inventory SET status='available',order_id=NULL WHERE status='reserved' AND order_id IN(SELECT id FROM orders WHERE status IN('expired','cancelled'))"), stmt(db, "UPDATE payment_invoices SET status='expired' WHERE status='waiting' AND watch_until<?", ts), stmt(db, 'DELETE FROM rate_limits WHERE reset_at<?', ts), stmt(db, 'DELETE FROM sessions WHERE expires_at<?', ts)]);
-}
-const productQuery = `SELECT p.*, (SELECT count(*) FROM inventory i WHERE i.product_id=p.id AND i.status='available') AS stock FROM products p`;
-async function catalog(db: D1Database, env: RuntimeEnv) {
-    if (env.DEMO_MODE === 'true' && !(await first<{
-        n: number;
-    }>(db, 'SELECT count(*) AS n FROM categories'))!.n)
-        await seed(db, env, 'system');
-    await expire(db);
-    const products = await all<Product>(db, productQuery + ' WHERE p.active=1 AND p.category_id IN(SELECT id FROM categories WHERE active=1) ORDER BY featured DESC,created_at DESC');
-    const categories = await all(db, 'SELECT * FROM categories WHERE active=1 ORDER BY sort');
-    const settings = Object.fromEntries((await all<{
-        key: string;
-        value: string;
-    }>(db, 'SELECT * FROM settings')).map(s => [s.key, s.value]));
-    return { products, categories, settings, demo: env.DEMO_MODE === 'true', paymentEnabled: (await paymentConfiguration(env)).enabled };
-}
-async function authenticated(db: D1Database, request: Request, roles?: string[]) {
-    const token = request.headers.get('cookie')?.split(';').map(s => s.trim()).find(s => s.startsWith('px_session='))?.slice(11);
-    if (!token)
-        fail(401, '请先登录管理后台');
-    const person = await first<Staff>(db, 'SELECT s.id,s.username,s.role,s.active,x.csrf FROM sessions x JOIN staff s ON x.staff_id=s.id WHERE x.hash=? AND x.expires_at>? AND s.active=1', await sha(token!), now());
-    if (!person)
-        fail(401, '登录已过期，请重新登录');
-    if (roles && !roles.includes(person!.role))
-        fail(403, '当前账号没有该操作权限');
-    if (request.method !== 'GET' && !safeEqual(request.headers.get('x-csrf-token') || '', person!.csrf!))
-        fail(403, '安全校验失败，请刷新后重试');
-    return person!;
-}
-async function loginSession(db: D1Database, id: string) {
-    const token = randomToken(), csrf = randomToken();
-    await stmt(db, 'INSERT INTO sessions VALUES(?,?,?,?)', await sha(token), id, csrf, now() + 8 * 3600000).run();
-    return json({ ok: true, csrf }, 200, { 'Set-Cookie': `px_session=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=28800` });
-}
-async function lookup(db: D1Database, env: RuntimeEnv, id: string, secret: string) {
-    const order = await first<Order & {
-        lookup_hash: string;
-    }>(db, 'SELECT * FROM orders WHERE id=? AND ready=1', id);
-    if (!order || !safeEqual(await sha(secret), order.lookup_hash))
-        fail(404, '订单号或查询密钥不正确');
-    const { lookup_hash, ...result } = order!;
-    result.items = await all(db, 'SELECT product_id,product_name,price,quantity FROM order_items WHERE order_id=?', id);
-    result.tickets = await all(db, 'SELECT * FROM tickets WHERE order_id=? ORDER BY created_at DESC', id);
-    result.payment = await invoiceForOrder(db, id);
-    if (result.status === 'fulfilled') {
-        const cards = await all<{
-            ciphertext: string;
-            product_id: string;
-        }>(db, "SELECT ciphertext,product_id FROM inventory WHERE order_id=? AND status='delivered'", id);
-        result.delivery = await Promise.all(cards.map(c => decrypt(c.ciphertext, env.INVENTORY_KEY!, c.product_id)));
-    }
-    return result;
-}
-// CHECK-constrained guard inserts abort the entire D1 batch on incomplete reservation.
-// This avoids trigger SQL, which some hosted migration runners split incorrectly.
-export function reservationGuard(db: D1Database, orderId: string) {
-    const guardId = uid();
-    return [stmt(db, `INSERT INTO transaction_guards(id,passed)
-        SELECT ?, CASE WHEN EXISTS(SELECT 1 FROM orders o WHERE o.id=? AND o.status='pending'
-            AND EXISTS(SELECT 1 FROM order_items WHERE order_id=o.id)
-            AND o.total=(SELECT sum(price*quantity) FROM order_items WHERE order_id=o.id)
-            AND NOT EXISTS(SELECT 1 FROM order_items l JOIN products p ON l.product_id=p.id JOIN categories c ON p.category_id=c.id
-                WHERE l.order_id=o.id AND (p.active!=1 OR c.active!=1 OR p.price!=l.price OR l.quantity<p.min_qty OR l.quantity>p.max_qty
-                OR l.quantity!=(SELECT count(*) FROM inventory i WHERE i.order_id=o.id AND i.product_id=l.product_id AND i.status='reserved'))))
-        THEN 1 ELSE 0 END`, guardId, orderId), stmt(db, 'DELETE FROM transaction_guards WHERE id=?', guardId)];
-}
-function fulfillmentGuard(db: D1Database, orderId: string, provider: string, reference: string) {
-    const guardId = uid();
-    return [stmt(db, `INSERT INTO transaction_guards(id,passed)
-        SELECT ?, CASE WHEN EXISTS(SELECT 1 FROM orders o WHERE o.id=? AND o.status IN('paid','fulfilled') AND o.payment_provider=? AND o.payment_ref=?
-            AND EXISTS(SELECT 1 FROM order_items WHERE order_id=o.id)
-            AND NOT EXISTS(SELECT 1 FROM order_items l WHERE l.order_id=o.id AND l.quantity!=(SELECT count(*) FROM inventory i WHERE i.order_id=o.id AND i.product_id=l.product_id AND i.status='delivered')))
-        THEN 1 ELSE 0 END`, guardId, orderId, provider, reference), stmt(db, 'DELETE FROM transaction_guards WHERE id=?', guardId)];
-}
-export async function settleOrder(db: D1Database, id: string, actor: string, reason: string, provider: string, reference: string, amount?: number, extra: D1PreparedStatement[] = []) {
-    const order = await first<Order>(db, 'SELECT * FROM orders WHERE id=?', id);
-    if (!order)
-        fail(404, '订单不存在');
-    if (amount !== undefined && order!.total !== amount)
-        fail(400, '支付金额与订单不一致');
-    if (order!.status === 'fulfilled') {
-        const payment = await first<{
-            payment_ref: string;
-            payment_provider: string;
-        }>(db, 'SELECT payment_ref,payment_provider FROM orders WHERE id=?', id);
-        if (payment!.payment_ref !== reference || payment!.payment_provider !== provider)
-            fail(409, '订单已由其他交易付款');
-        return { ok: true, idempotent: true };
-    }
-    if (order!.status !== 'pending' || order!.expires_at <= now())
-        fail(409, '订单已过期或无法确认付款');
-    const ts = now();
-    try {
-        await db.batch([
-            ...extra,
-            stmt(db, "UPDATE orders SET status='paid',paid_at=?,payment_provider=?,payment_ref=? WHERE id=? AND status='pending' AND expires_at>?", ts, provider, reference, id, ts),
-            stmt(db, "UPDATE inventory SET status='delivered' WHERE order_id=? AND status='reserved' AND EXISTS(SELECT 1 FROM orders WHERE id=? AND status='paid')", id, id),
-            ...fulfillmentGuard(db, id, provider, reference),
-            stmt(db, "UPDATE orders SET status='fulfilled',fulfilled_at=? WHERE id=? AND status='paid'", ts, id), audit(db, actor, 'order.fulfill', id, reason)
-        ]);
-    }
-    catch {
-        fail(409, '发货失败：库存状态或交易流水冲突，请核对订单');
-    }
-    const final = await first<{
-        status: string;
-    }>(db, 'SELECT status FROM orders WHERE id=?', id);
-    if (final!.status !== 'fulfilled')
-        fail(409, '订单状态已变化，请刷新确认');
-    return { ok: true };
-}
-async function seed(db: D1Database, env: RuntimeEnv, actor: string) {
-    if (env.DEMO_MODE !== 'true')
-        fail(403, '只有演示环境可以导入演示商品');
-    if (!env.INVENTORY_KEY)
-        fail(503, '库存加密密钥未配置');
-    const ts = now();
-    const statements: D1PreparedStatement[] = [];
-    categorySeed.forEach(([id, name, icon], i) => statements.push(stmt(db, 'INSERT OR IGNORE INTO categories VALUES(?,?,?,?,1)', id, name, icon, i)));
-    for (const [id, category, name, subtitle, tag, region, price, compare, label] of productSeed) {
-        statements.push(stmt(db, 'INSERT OR IGNORE INTO products(id,category_id,name,subtitle,description,instructions,price,compare_price,min_qty,max_qty,featured,active,region,tag,is_example,created_at) VALUES(?,?,?,?,?,?,?,?,1,20,?,1,?,?,1,?)', id, category, name, subtitle, `这是用于展示商城流程的示例商品，不提供真实的第三方账号或授权。正式经营时请替换为有权销售的商品。`, '下单前确认商品适用地区及使用要求。演示卡密仅用于测试系统。', price, compare, label === '热门推荐' ? 1 : 0, region, tag, ts));
-        for (let n = 0; n < 1; n++) {
-            const code = `DEMO-${id}-${n + 1}`;
-            statements.push(stmt(db, 'INSERT OR IGNORE INTO inventory(id,product_id,ciphertext,fingerprint,status,order_id,created_at) VALUES(?,?,?,?,\'available\',NULL,?)', uid(), id, await encrypt(code, env.INVENTORY_KEY!, id as string), await sha(`${id}:${code}`), ts));
-        }
-    }
-    for (const [key, value] of Object.entries({ brand: '品享', tagline: '好工具，好灵感，好好享受数字生活。', announcement: '欢迎体验品享。这是独立演示商城，示例商品用于体验购买与交付，不收取真实款项。', support: '请通过订单页面提交售后工单', businessHours: '工作日 09:00–18:00', footer: '数字商品交付平台', terms: '购买前请确认商品说明、适用地区及使用条件。数字商品交付后，如有质量问题请凭订单号提交售后工单。', privacy: '仅收集履行订单必需的联系信息。查询密钥用于验证订单访问权限。联系信息仅供客服处理订单使用。' }))
-        statements.push(stmt(db, 'INSERT OR IGNORE INTO settings VALUES(?,?)', key, value));
-    statements.push(audit(db, actor, 'demo.seed', 'catalog'));
-    await db.batch(statements);
-    return { ok: true };
-}
-export async function handleApi(request: Request, env: RuntimeEnv): Promise<Response> {
-    try {
-        const db = database(env), url = new URL(request.url), path = url.pathname.replace(/^\/api\//, ''), method = request.method;
-        if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(method))
-            fail(405, '请求方法不支持');
-        if (method !== 'GET' && path !== 'payments/webhook') {
-            const origin = request.headers.get('origin');
-            if (origin !== url.origin)
-                fail(403, '请求来源不正确');
-            if (!request.headers.get('content-type')?.startsWith('application/json'))
-                fail(415, '请使用 JSON 格式提交');
-        }
-        if (path === 'health' && method === 'GET') {
-            await first(db, 'SELECT count(*) as n FROM products');
-            return json({ ok: true, database: true });
-        }
-        if (path === 'catalog' && method === 'GET')
-            return json(await catalog(db, env));
+export async function handleApi(request:Request,env:RuntimeEnv):Promise<Response>{
+    try{
+        const db=database(env),url=new URL(request.url),path=url.pathname.replace(/^\/api\//,''),method=request.method;
+        if(!['GET','POST'].includes(method))fail(405,'请求方法不支持');
+        // Future payment callbacks are deliberately unavailable, even if historical secrets remain configured.
+        if(path.startsWith('payments/webhook'))return json({error:'支付回调接口已预留，尚未接入'},503);
+        if(method!=='GET'){if(request.headers.get('origin')!==url.origin)fail(403,'请求来源不正确');if(!request.headers.get('content-type')?.startsWith('application/json'))fail(415,'请使用 JSON 格式');}
+        if(path==='health'&&method==='GET'){await first(db,'SELECT count(*) AS n FROM physical_stock');return json({ok:true,database:true,commerce:'physical'});}
+        if(path==='catalog'&&method==='GET')return json(await catalog(db,env));
         if (path === 'auth/status' && method === 'GET') {
             const count = await first<{
                 n: number;
@@ -264,256 +155,83 @@ export async function handleApi(request: Request, env: RuntimeEnv): Promise<Resp
             await stmt(db, 'DELETE FROM sessions WHERE staff_id=? AND csrf=?', p.id, p.csrf).run();
             return json({ ok: true }, 200, { 'Set-Cookie': 'px_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0' });
         }
-        if (path === 'orders' && method === 'POST') {
-            await limit(db, request, 'order', 10);
-            await expire(db);
-            const b = await body(request), contact = str(b.contact, 100);
-            if (!contact || !Array.isArray(b.items) || !b.items.length || b.items.length > 12)
-                fail(400, '请填写联系方式并选择商品');
-            if (b.acceptedTerms !== true)
-                fail(400, '请阅读并同意购买说明');
-            const combined = new Map<string, number>();
-            for (const item of b.items) {
-                const id = str(item.id, 64);
-                const qty = integer(item.quantity, 1, 100);
-                combined.set(id, (combined.get(id) || 0) + qty);
-            }
-            const lines: {
-                p: Product;
-                q: number;
-            }[] = [];
-            for (const [id, q] of combined) {
-                const p = await first<Product>(db, productQuery + ' WHERE p.id=? AND p.active=1 AND p.category_id IN(SELECT id FROM categories WHERE active=1)', id);
-                if (!p)
-                    fail(400, '商品已下架');
-                if (p!.is_example && env.DEMO_MODE !== 'true')
-                    fail(400, '示例商品不能进行正式交易');
-                if (q < p!.min_qty || q > p!.max_qty || q > p!.stock)
-                    fail(409, `${p!.name} 库存不足或数量超限`);
-                lines.push({ p: p!, q });
-            }
-            const total = lines.reduce((sum, l) => sum + l.p.price * l.q, 0);
-            const id = 'PX' + new Date().toISOString().slice(0, 10).replaceAll('-', '') + randomToken().slice(0, 12).toUpperCase(), secret = randomToken(), ts = now();
-            const statements = [stmt(db, 'INSERT INTO orders(id,lookup_hash,contact,total,status,ready,demo,created_at,expires_at) VALUES(?,?,?,?,\'pending\',0,?,?,?)', id, await sha(secret), contact, total, env.DEMO_MODE === 'true' ? 1 : 0, ts, ts + 15 * 60000)];
-            for (const { p, q } of lines) {
-                statements.push(stmt(db, 'INSERT INTO order_items VALUES(?,?,?,?,?,?)', uid(), id, p.id, p.name, p.price, q));
-                statements.push(stmt(db, "UPDATE inventory SET status='reserved',order_id=? WHERE id IN(SELECT id FROM inventory WHERE product_id=? AND status='available' ORDER BY created_at,id LIMIT ?)", id, p.id, q));
-            }
-            statements.push(...reservationGuard(db, id), stmt(db, 'UPDATE orders SET ready=1 WHERE id=?', id));
-            try {
-                await db.batch(statements);
-            }
-            catch {
-                fail(409, '库存或商品已变化，请刷新后重新下单');
-            }
-            return json({ id, secret, total, expires_at: ts + 15 * 60000, demo: env.DEMO_MODE === 'true' }, 201);
+        if(path==='orders'&&method==='POST'){await limit(db,request,'order',10);await expire(db);return json(await createOrder(db,env,await body(request)),201);}
+        if(path==='orders/lookup'&&method==='POST'){await limit(db,request,'lookup',20);await expire(db);const b=await body(request);return json(await lookup(db,env,str(b.id,64),str(b.secret,128)));}
+        if(path==='orders/demo-pay'&&method==='POST'){
+            if(env.DEMO_MODE!=='true')fail(403,'正式商城不提供模拟付款');await limit(db,request,'demo-pay',10);await expire(db);const b=await body(request),id=str(b.id,64),secret=str(b.secret,128);const order=await lookup(db,env,id,secret);if(!order.demo)fail(403,'正式订单不能模拟付款');await settleOrder(db,id,'demo-buyer','仅演示，未收取款项','demo','demo-'+id);return json(await lookup(db,env,id,secret));
         }
-        if (path === 'orders/lookup' && method === 'POST') {
-            await limit(db, request, 'lookup', 20);
-            await expire(db);
-            const b = await body(request);
-            return json(await lookup(db, env, str(b.id, 64), str(b.secret, 128)));
+        if(path==='orders/cancel'&&method==='POST'){
+            const b=await body(request),id=str(b.id,64);const o=await lookup(db,env,id,str(b.secret,128));if(o.order_type!=='physical')fail(409,'历史订单仅供查询');if(o.status==='cancelled')return json({ok:true});if(o.status!=='pending')fail(409,'当前订单无法取消');
+            try{await db.batch([stmt(db,"UPDATE orders SET status='cancelled' WHERE id=? AND status='pending'",id),...guard(db,"EXISTS(SELECT 1 FROM orders WHERE id=? AND status='cancelled')",id),...releaseStock(db)]);}catch{fail(409,'订单状态已变化，无法取消');}return json({ok:true});
         }
-        if (path === 'orders/demo-pay' && method === 'POST') {
-            if (env.DEMO_MODE !== 'true') fail(403, '正式商城不提供模拟付款');
-            await limit(db, request, 'demo-pay', 10);
-            await expire(db);
-            const b = await body(request), id = str(b.id, 64), secret = str(b.secret, 128);
-            const order = await lookup(db, env, id, secret);
-            if (!order.demo) fail(403, '正式订单不能模拟付款');
-            await settleOrder(db, id, 'demo-buyer', '演示流程，未收取真实款项', 'demo', 'demo-' + id);
-            return json(await lookup(db, env, id, secret));
+        if(path==='tickets'&&method==='POST'){
+            await limit(db,request,'ticket',10);const b=await body(request);await lookup(db,env,str(b.orderId,64),str(b.secret,128));const subject=str(b.subject,100),message=str(b.message,2000);if(!subject||message.length<5)fail(400,'请填写问题主题和详细说明');const id=uid();await stmt(db,"INSERT INTO tickets VALUES(?,?,?,?,'open','',?,?)",id,b.orderId,subject,message,now(),now()).run();return json({ok:true,id},201);
         }
-        if (path === 'orders/cancel' && method === 'POST') {
-            const b = await body(request);
-            await lookup(db, env, str(b.id, 64), str(b.secret, 128));
-            await db.batch([stmt(db, "UPDATE orders SET status='cancelled' WHERE id=? AND status='pending' AND NOT EXISTS(SELECT 1 FROM payment_invoices WHERE order_id=?)", b.id, b.id), stmt(db, "UPDATE inventory SET status='available',order_id=NULL WHERE order_id=? AND status='reserved' AND EXISTS(SELECT 1 FROM orders WHERE id=? AND status='cancelled')", b.id, b.id)]);
-            if (await invoiceForOrder(db, b.id)) fail(409, '支付单已生成，系统会在到账核验结束后自动关闭未付款订单');
-            return json({ ok: true });
+        if(path==='payments/methods'&&method==='GET')return json({methods:paymentMethods});
+        if(path==='payments/create'&&method==='POST'){
+            await limit(db,request,'payment-create',10);const b=await body(request),order=await lookup(db,env,str(b.id,64),str(b.secret,128));const selected=str(b.method,20)||order.payment_method;if(!paymentMethods.some(p=>p.id===selected))fail(400,'支付方式无效');return json({...reservedPayment({orderId:order.id,amount:order.total,currency:'CNY',method:selected as PaymentMethod}),error:'支付接口已预留，尚未接通'},503);
         }
-        if (path === 'tickets' && method === 'POST') {
-            await limit(db, request, 'ticket', 10);
-            const b = await body(request);
-            await lookup(db, env, str(b.orderId, 64), str(b.secret, 128));
-            const subject = str(b.subject, 100), message = str(b.message, 2000);
-            if (!subject || message.length < 5)
-                fail(400, '请填写问题主题和详细说明');
-            const id = uid();
-            await stmt(db, 'INSERT INTO tickets VALUES(?,?,?,?,\'open\',\'\',?,?)', id, b.orderId, subject, message, now(), now()).run();
-            return json({ ok: true, id }, 201);
-        }
-        if (path === 'payments/create' && method === 'POST') {
-            await limit(db, request, 'payment-create', 10);
-            const b = await body(request);
-            const order = await lookup(db, env, str(b.id, 64), str(b.secret, 128));
-            return json(await createInvoice(db, env, order));
-        }
-        if (path === 'payments/check' && method === 'POST') {
-            await limit(db, request, 'payment-check', 20);
-            const b = await body(request), id = str(b.id, 64), secret = str(b.secret, 128);
-            const order = await lookup(db, env, id, secret);
-            if (!order.payment) fail(409, '请先生成 USDT 支付单');
-            let message = '已检查链上到账，尚未确认时请稍后再查，请勿重复付款。';
-            if (b.txId) message = (await checkTransaction(db, env, id, str(b.txId, 100), settleOrder)).message;
-            else await reconcilePayments(env, settleOrder, order.payment!.address);
-            await expire(db);
-            return json({ order: await lookup(db, env, id, secret), message });
-        }
-        if (path === 'payments/webhook' && method === 'POST') {
-            if (!env.PAYMENT_WEBHOOK_SECRET || env.PAYMENT_PROVIDER !== 'custom-hmac')
-                fail(503, '支付回调未启用');
-            await limit(db, request, 'webhook', 60);
-            const raw = await request.text();
-            if (raw.length > 10000)
-                fail(413, '回调内容过大');
-            const timestamp = request.headers.get('x-payment-timestamp') || '', signature = request.headers.get('x-payment-signature') || '';
-            if (!/^\d{10}$/.test(timestamp) || Math.abs(now() / 1000 - Number(timestamp)) > 300 || !safeEqual(signature, await hmac(`${timestamp}.${raw}`, env.PAYMENT_WEBHOOK_SECRET!)))
-                fail(401, '支付签名无效');
-            let b: any;
-            try {
-                b = JSON.parse(raw);
+        if(path==='payments/check')fail(503,'支付查询接口已预留，尚未接通');
+        if(path.startsWith('admin/')){
+            const section=path.split('/')[1],roleMap:Record<string,string[]>={products:['owner','operator'],inventory:['owner','operator'],gifts:['owner'],shipment:['owner','operator'],categories:['owner','operator'],settings:['owner'],staff:['owner'],audits:['owner'],payment:['owner'],seed:['owner']};
+            const p=await authenticated(db,request,roleMap[section]);await expire(db);
+            if(section==='payment'&&method==='GET')return json({methods:paymentMethods,shippingFee:SHIPPING_FEE,demo:env.DEMO_MODE==='true'});
+            if(section==='payment'&&method==='POST')fail(503,'三个支付接口均已预留，暂未接通');
+            if(section==='supplier')fail(410,'实体商城不启用原数字货源采购接口');
+            if(section==='overview'&&method==='GET'){
+                const stats=await first(db,`SELECT count(*) AS orders,coalesce(sum(CASE WHEN status IN('paid','fulfilled') THEN total ELSE 0 END),0) AS revenue,coalesce(sum(status='pending'),0) AS pending,coalesce(sum(status='paid' AND shipping_status='pending'),0) AS awaitingShipment,coalesce(sum(shipping_status='shipped'),0) AS fulfilled FROM orders WHERE order_type='physical'`),stock=await first(db,'SELECT coalesce(sum(available),0) AS stock FROM physical_stock'),tickets=await first(db,"SELECT count(*) AS tickets FROM tickets WHERE status='open'");
+                return json({stats:{...stats,...stock,...tickets},trend:await all(db,`SELECT date(created_at/1000,'unixepoch','+8 hours') AS day,count(*) AS orders,coalesce(sum(CASE WHEN status IN('paid','fulfilled') THEN total ELSE 0 END),0) AS revenue FROM orders WHERE order_type='physical' AND created_at>? GROUP BY day ORDER BY day`,now()-7*86400000),recent:await all(db,"SELECT id,contact,total,status,created_at,demo,shipping_status,tracking_number FROM orders WHERE order_type='physical' ORDER BY created_at DESC LIMIT 8"),lowStock:await all(db,productQuery+" WHERE p.product_type='physical' AND p.active=1 AND coalesce(s.available,0)<10 LIMIT 10"),demo:env.DEMO_MODE==='true',readiness:p.role==='owner'?{brandReady:!!(await settings(db)).brand,products:(await first<any>(db,"SELECT count(*) AS n FROM products WHERE product_type='physical' AND active=1")).n,stock:(stock as any).stock,gifts:(await first<any>(db,"SELECT count(*) AS n FROM telegram_gifts WHERE status='available' AND is_example=?",env.DEMO_MODE==='true'?1:0)).n,demo:env.DEMO_MODE==='true',encryptionReady:!!env.INVENTORY_KEY,paymentReady:false}:undefined});
             }
-            catch {
-                fail(400, '回调内容无效');
+            if(section==='products'&&method==='GET')return json({products:await all(db,productQuery+" WHERE p.product_type='physical' ORDER BY p.created_at DESC"),categories:await all(db,categoryQuery)});
+            if(section==='products'&&method==='POST'){
+                const b=await body(request),id=str(b.id,64)||uid(),name=str(b.name,120),category=str(b.category_id,64),imageUrl=str(b.image_url,1000);
+                if(!name||!await first(db,'SELECT id FROM categories WHERE id=?',category))fail(400,'商品名称或分类无效');if(await first(db,"SELECT id FROM products WHERE id=? AND product_type!='physical'",id))fail(409,'历史数字商品不能直接转为实体商品');
+                if(imageUrl){try{const u=new URL(imageUrl);if(u.protocol!=='https:'||u.username||u.password)throw Error();}catch{fail(400,'商品图片需为有效的 HTTPS 地址');}}
+                const price=integer(b.price,1,10000000),min=integer(b.min_qty,1,100),max=integer(b.max_qty,min,100),iconKey=str(b.icon_key,20);
+                if(!['','cup','bottle','bag','lamp','notebook','desk','home','outdoor','umbrella','box'].includes(iconKey))fail(400,'请选择有效的实体商品图标');
+                await db.batch([stmt(db,`INSERT INTO products(id,category_id,name,subtitle,description,instructions,price,compare_price,min_qty,max_qty,featured,active,region,tag,is_example,created_at,product_type,icon_key,image_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,'physical',?,?) ON CONFLICT(id) DO UPDATE SET category_id=excluded.category_id,name=excluded.name,subtitle=excluded.subtitle,description=excluded.description,instructions=excluded.instructions,price=excluded.price,compare_price=excluded.compare_price,min_qty=excluded.min_qty,max_qty=excluded.max_qty,featured=excluded.featured,active=excluded.active,region=excluded.region,tag=excluded.tag,icon_key=excluded.icon_key,image_url=excluded.image_url`,id,category,name,str(b.subtitle,150),str(b.description,4000),str(b.instructions,4000),price,integer(b.compare_price||0,0,10000000),min,max,b.featured?1:0,b.active?1:0,str(b.region,30),str(b.tag,30),now(),iconKey,imageUrl),stmt(db,'INSERT OR IGNORE INTO physical_stock(product_id) VALUES(?)',id),audit(db,p.id,'product.save',id,name)]);return json({ok:true,id});
             }
-            if (b.status !== 'paid' || b.currency !== 'CNY' || !Number.isInteger(b.amount) || !str(b.transactionId, 100))
-                fail(400, '支付结果无效');
-            await expire(db);
-            return json(await settleOrder(db, str(b.orderId, 64), 'payment', '已验证自定义 HMAC 回调', 'custom-hmac', str(b.transactionId, 100), b.amount));
-        }
-        if (path.startsWith('admin/')) {
-            const roleMap: Record<string, string[]> = { products: ['owner', 'operator'], inventory: ['owner', 'operator'], categories: ['owner', 'operator'], settings: ['owner'], staff: ['owner'], audits: ['owner'], payment: ['owner'], supplier: ['owner'] };
-            const section = path.split('/')[1], p = await authenticated(db, request, roleMap[section]);
-            await expire(db);
-            if (section === 'supplier' && method === 'GET') return json(await supplierDashboard(db, env));
-            if (section === 'supplier' && method === 'POST') {
-                await limit(db, request, 'admin-supplier', 12);
-                const b = await body(request);
-                if (b.action === 'account') return json(await supplierAccount(db, env));
-                if (b.action === 'sync') return json(await syncSupplier(db, env, p.id));
-                if (b.action === 'quote') return json(await quoteSupplier(db, env, p.id, integer(b.goodsId, 1, 1000000000), integer(b.quantity, 1, 30)));
-                if (b.action === 'purchase' && b.confirm === true) return json(await purchaseSupplier(db, env, p.id, str(b.id, 100)));
-                fail(400, '请选择有效的货源操作；采购需要明确确认');
+            if(section==='categories'&&method==='GET')return json(await all(db,categoryQuery));
+            if(section==='categories'&&method==='POST'){const b=await body(request),id=str(b.id,64)||uid(),name=str(b.name,50);if(!name)fail(400,'请输入分类名称');await db.batch([stmt(db,'INSERT INTO categories VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,icon=excluded.icon,sort=excluded.sort,active=excluded.active',id,name,str(b.icon,20)||'box',integer(b.sort||0,0,1000),b.active?1:0),audit(db,p.id,'category.save',id,name)]);return json({ok:true});}
+            if(section==='inventory'&&method==='GET')return json({products:await all(db,productQuery+" WHERE p.product_type='physical'")});
+            if(section==='inventory'&&method==='POST'){
+                const b=await body(request),id=str(b.product_id,64),delta=integer(b.delta,-100000,100000),reason=str(b.reason,300);if(!delta||reason.length<2)fail(400,'请填写调整数量及原因');if(!await first(db,"SELECT product_id FROM physical_stock WHERE product_id=?",id))fail(404,'实体商品不存在');
+                try{await db.batch([stmt(db,'UPDATE physical_stock SET available=available+? WHERE product_id=?',delta,id),audit(db,p.id,'stock.adjust',id,`${delta>0?'+':''}${delta} / ${reason}`)]);}catch{fail(409,'可售库存不足，不能减少已锁定或已售数量');}return json({ok:true});
             }
-            if (section === 'payment' && method === 'GET') return json(await paymentDashboard(db, env));
-            if (section === 'payment' && method === 'POST') {
-                await limit(db, request, 'admin-payment', 10);
-                const b = await body(request);
-                const result = b.txId ? await checkTransaction(db, env, str(b.orderId, 64), str(b.txId, 100), settleOrder) : await reconcilePayments(env, settleOrder);
-                await audit(db, p.id, 'payment.reconcile', str(b.orderId, 64) || 'wallet').run();
-                return json(result);
+            if(section==='gifts'&&method==='GET')return json({stats:await first(db,"SELECT coalesce(sum(status='available'),0) AS available,coalesce(sum(status='assigned'),0) AS assigned FROM telegram_gifts WHERE is_example=?",env.DEMO_MODE==='true'?1:0),recent:await all(db,'SELECT id,status,order_id,is_example,created_at,assigned_at FROM telegram_gifts ORDER BY created_at DESC LIMIT 100'),demo:env.DEMO_MODE==='true'});
+            if(section==='gifts'&&method==='POST'){
+                const b=await body(request),codes=String(b.codes||'').split('\n').map(x=>x.trim()).filter(Boolean);if(!codes.length||codes.length>30||codes.some(x=>x.length>2000||!x.split('|')[0].trim()))fail(400,'每次导入 1–30 个账号，每行一个，单条不超过 2000 字');if(!env.INVENTORY_KEY)fail(503,'赠送账号加密密钥未配置');const st=[];
+                for(const code of new Set(codes)){const identity=code.split('|')[0].trim().toLowerCase();st.push(stmt(db,"INSERT OR IGNORE INTO telegram_gifts(id,ciphertext,fingerprint,status,is_example,created_at) VALUES(?,?,?,'available',?,?)",uid(),await encrypt(code,env.INVENTORY_KEY!,GIFT_CONTEXT),await sha('telegram-account:'+identity),env.DEMO_MODE==='true'?1:0,now()));}
+                const results=await db.batch([...st,audit(db,p.id,'gift.import','telegram',`提交 ${codes.length} 个`)]),imported=results.slice(0,-1).reduce((n,r)=>n+r.meta.changes,0);return json({ok:true,imported,skipped:codes.length-imported});
             }
-            if (section === 'overview' && method === 'GET') {
-                const stats = await first(db, "SELECT count(*) AS orders, coalesce(sum(CASE WHEN status='fulfilled' THEN total ELSE 0 END),0) AS revenue, sum(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending, sum(CASE WHEN status='fulfilled' THEN 1 ELSE 0 END) AS fulfilled FROM orders");
-                const stock = await first(db, "SELECT count(*) AS stock FROM inventory WHERE status='available'");
-                const tickets = await first(db, "SELECT count(*) AS tickets FROM tickets WHERE status='open'");
-                const trend = await all(db, "SELECT date(created_at/1000,'unixepoch','+8 hours') AS day, count(*) AS orders, sum(CASE WHEN status='fulfilled' THEN total ELSE 0 END) AS revenue FROM orders WHERE created_at>? GROUP BY day ORDER BY day", now() - 7 * 86400000);
-                const readiness = p.role === 'owner' ? {
-                    demo: env.DEMO_MODE === 'true',
-                    brandReady: !!(await first(db, "SELECT value FROM settings WHERE key='brand' AND trim(value)!=''")),
-                    products: (await first<any>(db, 'SELECT count(*) AS n FROM products WHERE active=1 AND category_id IN(SELECT id FROM categories WHERE active=1)')).n,
-                    stock: (stock as any).stock,
-                    encryptionReady: /^[a-fA-F0-9]{64}$/.test(env.INVENTORY_KEY || ''),
-                    paymentReady: (await paymentConfiguration(env)).enabled
-                } : undefined;
-                return json({ readiness, stats: { ...stats, ...stock, ...tickets }, trend, recent: await all(db, 'SELECT id,contact,total,status,created_at,demo FROM orders ORDER BY created_at DESC LIMIT 8'), lowStock: await all(db, productQuery + " WHERE p.active=1 AND (SELECT count(*) FROM inventory i WHERE i.product_id=p.id AND i.status='available')<10 LIMIT 10"), demo: env.DEMO_MODE === 'true' });
+            if(section==='orders'&&method==='GET'){
+                const page=Math.max(1,Math.min(10000,Math.trunc(Number(url.searchParams.get('page')))||1)),q=str(url.searchParams.get('q'),100),status=str(url.searchParams.get('status'),20);const where=" WHERE order_type='physical' AND id LIKE ? AND (?='' OR status=?)";return json({orders:await all(db,'SELECT id,contact,recipient,shipping_address,total,subtotal,shipping_fee,status,shipping_status,tracking_number,created_at,expires_at,demo FROM orders'+where+' ORDER BY created_at DESC LIMIT 50 OFFSET ?',`%${q}%`,status,status,(page-1)*50),total:(await first<any>(db,'SELECT count(*) AS n FROM orders'+where,`%${q}%`,status,status)).n,page});
             }
-            if (section === 'order' && method === 'GET') {
-                const id = str(url.searchParams.get('id'), 64);
-                const order = await first<any>(db, 'SELECT id,contact,total,status,demo,created_at,expires_at,paid_at,fulfilled_at,payment_provider,payment_ref FROM orders WHERE id=? AND ready=1', id);
-                if (!order) fail(404, '订单不存在');
-                return json({...order,
-                    items: await all(db, 'SELECT product_id,product_name,price,quantity FROM order_items WHERE order_id=?', id),
-                    tickets: await all(db, 'SELECT * FROM tickets WHERE order_id=? ORDER BY created_at DESC', id),
-                    delivered: (await first<any>(db, "SELECT count(*) AS n FROM inventory WHERE order_id=? AND status='delivered'", id)).n
-                });
+            if(section==='order'&&method==='GET'){
+                const id=str(url.searchParams.get('id'),64),o=await first<any>(db,'SELECT id,contact,recipient,shipping_address,total,subtotal,shipping_fee,order_type,status,demo,shipping_status,tracking_number,shipped_at,payment_method,created_at,expires_at,paid_at,fulfilled_at,payment_provider,payment_ref FROM orders WHERE id=? AND ready=1',id);if(!o)fail(404,'订单不存在');return json({...o,items:await all(db,'SELECT product_id,product_name,price,quantity FROM order_items WHERE order_id=?',id),tickets:await all(db,'SELECT * FROM tickets WHERE order_id=? ORDER BY created_at DESC',id),giftAssigned:!!await first(db,'SELECT id FROM telegram_gifts WHERE order_id=?',id)});
             }
-            if (section === 'products' && method === 'GET')
-                return json({ products: await all(db, productQuery + ' ORDER BY created_at DESC'), categories: await all(db, 'SELECT * FROM categories ORDER BY sort') });
-            if (section === 'products' && method === 'POST') {
-                const b = await body(request), id = str(b.id, 64) || uid(), name = str(b.name, 120), category = str(b.category_id, 64);
-                if (!name || !await first(db, 'SELECT id FROM categories WHERE id=?', category))
-                    fail(400, '商品名称或分类无效');
-                const iconKey = str(b.icon_key, 20).toLowerCase(), countryCode = str(b.country_code, 2).toUpperCase();
-                if (!['', 'telegram', 'x', 'apple', 'google', 'openai', 'outlook', 'instagram', 'facebook', 'whatsapp', 'software', 'digital', 'service', 'learning', 'workspace', 'ai'].includes(iconKey)) fail(400, '请选择有效的商品图标');
-                if (countryCode && !/^[A-Z]{2}$/.test(countryCode)) fail(400, '地区代码需为两个英文字母');
-                const price = integer(b.price, 1, 10000000), min = integer(b.min_qty, 1, 100), max = integer(b.max_qty, min, 100);
-                await db.batch([stmt(db, `INSERT INTO products(id,category_id,name,subtitle,description,instructions,price,compare_price,min_qty,max_qty,featured,active,region,tag,is_example,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?) ON CONFLICT(id) DO UPDATE SET category_id=excluded.category_id,name=excluded.name,subtitle=excluded.subtitle,description=excluded.description,instructions=excluded.instructions,price=excluded.price,compare_price=excluded.compare_price,min_qty=excluded.min_qty,max_qty=excluded.max_qty,featured=excluded.featured,active=excluded.active,region=excluded.region,tag=excluded.tag`, id, category, name, str(b.subtitle, 150), str(b.description, 4000), str(b.instructions, 4000), price, integer(b.compare_price || 0, 0, 10000000), min, max, b.featured ? 1 : 0, b.active ? 1 : 0, str(b.region, 30), str(b.tag, 30), now()), stmt(db, 'UPDATE products SET icon_key=?,country_code=? WHERE id=?', iconKey, countryCode, id), audit(db, p.id, 'product.save', id, name)]);
-                return json({ ok: true, id });
+            if(section==='orders'&&method==='POST'){
+                if(p.role!=='owner')fail(403,'仅店主可以确认收款或登记退款');const b=await body(request),id=str(b.id,64),reason=str(b.reason,300),reference=str(b.reference,100);if(reason.length<5||!reference)fail(400,'请填写处理依据和流水号');
+                if(b.action==='refund'){if(!await first(db,"SELECT id FROM orders WHERE id=? AND order_type='physical' AND status IN('paid','fulfilled')",id))fail(409,'仅已付款订单可登记退款');await db.batch([stmt(db,"UPDATE orders SET status='refunded' WHERE id=? AND status IN('paid','fulfilled')",id),audit(db,p.id,'order.refund',id,reason+' / '+reference)]);return json({ok:true});}
+                return json(await settleOrder(db,id,p.id,reason,env.DEMO_MODE==='true'?'demo-manual':'manual',reference));
             }
-            if (section === 'categories' && method === 'GET')
-                return json(await all(db, 'SELECT * FROM categories ORDER BY sort'));
-            if (section === 'categories' && method === 'POST') {
-                const b = await body(request), id = str(b.id, 64) || uid(), name = str(b.name, 50);
-                if (!name)
-                    fail(400, '请输入分类名称');
-                await db.batch([stmt(db, 'INSERT INTO categories VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,icon=excluded.icon,sort=excluded.sort,active=excluded.active', id, name, str(b.icon, 20) || 'box', integer(b.sort || 0, 0, 1000), b.active ? 1 : 0), audit(db, p.id, 'category.save', id, name)]);
-                return json({ ok: true });
+            if(section==='address'&&method==='POST'){
+                const b=await body(request),id=str(b.id,64),recipient=str(b.recipient,60),contact=str(b.contact,100),address=str(b.shipping_address,500);
+                try{await db.batch([
+                    ...guard(db,"EXISTS(SELECT 1 FROM orders WHERE id=? AND order_type='physical' AND status IN('pending','paid') AND shipping_status='pending')",id),
+                    stmt(db,'UPDATE orders SET recipient=?,contact=?,shipping_address=? WHERE id=?',recipient,contact,address,id),
+                    audit(db,p.id,'order.address',id,'补充或修正收货资料')
+                ]);}catch{fail(409,'仅待付款或已付款待发货的实体订单可以修改收货信息');}
+                return json({ok:true});
             }
-            if (section === 'inventory' && method === 'GET')
-                return json({ products: await all(db, productQuery), batches: await all(db, 'SELECT product_id,status,count(*) AS count FROM inventory GROUP BY product_id,status') });
-            if (section === 'inventory' && method === 'POST') {
-                const b = await body(request), productId = str(b.product_id, 64);
-                if (!await first(db, 'SELECT id FROM products WHERE id=?', productId))
-                    fail(404, '商品不存在');
-                if (!env.INVENTORY_KEY)
-                    fail(503, '库存加密密钥未配置');
-                const codes = String(b.codes || '').split('\n').map(s => s.trim()).filter(Boolean);
-                if (!codes.length || codes.length > 30 || codes.some(c => c.length > 2000))
-                    fail(400, '每次导入 1–30 条，每行一个，单条最多 2000 字');
-                let imported = 0;
-                const statements = [];
-                for (const code of new Set(codes)) {
-                    const fingerprint = await sha(`${productId}:${code}`);
-                    statements.push(stmt(db, "INSERT OR IGNORE INTO inventory VALUES(?,?,?,?,'available',NULL,?)", uid(), productId, await encrypt(code, env.INVENTORY_KEY!, productId), fingerprint, now()));
-                }
-                const results = await db.batch([...statements, audit(db, p.id, 'inventory.import', productId, `提交 ${codes.length} 条`)]);
-                results.slice(0, -1).forEach(r => imported += r.meta.changes);
-                return json({ ok: true, imported, skipped: codes.length - imported });
+            if(section==='shipment'&&method==='POST'){
+                const b=await body(request),id=str(b.id,64),tracking=str(b.tracking_number,100);if(!/^[A-Za-z0-9][A-Za-z0-9 _-]{3,99}$/.test(tracking))fail(400,'请填写有效物流单号（4–100 位）');const o=await first<any>(db,"SELECT * FROM orders WHERE id=? AND order_type='physical'",id);if(!o)fail(404,'订单不存在');if(o.shipping_status==='shipped'){if(o.tracking_number===tracking)return json({ok:true,idempotent:true});fail(409,'订单已发货，不能重复填写不同单号');}if(o.status!=='paid')fail(409,'请先确认收款，再进行发货');
+                try{await db.batch([stmt(db,"UPDATE orders SET status='fulfilled',shipping_status='shipped',tracking_number=?,shipped_at=?,fulfilled_at=? WHERE id=? AND status='paid' AND shipping_status='pending'",tracking,now(),now(),id),...guard(db,"EXISTS(SELECT 1 FROM orders WHERE id=? AND status='fulfilled' AND shipping_status='shipped' AND tracking_number=?)",id,tracking),audit(db,p.id,'order.ship',id,tracking)]);}catch{fail(409,'订单状态已变化，请刷新核对');}return json({ok:true});
             }
-            if (section === 'orders' && method === 'GET') {
-                const page = Math.max(1, Math.min(10000, Number(url.searchParams.get('page')) || 1)), search = str(url.searchParams.get('q'), 100), status = str(url.searchParams.get('status'), 20);
-                const where = ' WHERE id LIKE ? AND (?=\'\' OR status=?)';
-                return json({ orders: await all(db, 'SELECT id,contact,total,status,created_at,expires_at,demo FROM orders' + where + ' ORDER BY created_at DESC LIMIT 50 OFFSET ?', `%${search}%`, status, status, (page - 1) * 50), total: (await first<{
-                        n: number;
-                    }>(db, 'SELECT count(*) AS n FROM orders' + where, `%${search}%`, status, status))!.n, page });
-            }
-            if (section === 'orders' && method === 'POST') {
-                if (p.role !== 'owner')
-                    fail(403, '仅店主可以确认收款');
-                const b = await body(request);
-                if (str(b.reason, 300).length < 5 || !str(b.reference, 100))
-                    fail(400, '请填写收款依据和唯一流水号');
-                if (b.action === 'refund') {
-                    if (!await first(db, "SELECT id FROM orders WHERE id=? AND status='fulfilled'", str(b.id, 64)))
-                        fail(409, '仅已发货订单可登记退款');
-                    await db.batch([stmt(db, "UPDATE orders SET status='refunded' WHERE id=? AND status='fulfilled'", str(b.id, 64)), audit(db, p.id, 'order.refund', str(b.id, 64), str(b.reason, 300) + ' / ' + str(b.reference, 100))]);
-                    return json({ ok: true });
-                }
-                return json(await settleOrder(db, str(b.id, 64), p.id, str(b.reason, 300), env.DEMO_MODE === 'true' ? 'demo-manual' : 'manual', str(b.reference, 100)));
-            }
-            if (section === 'tickets' && method === 'GET')
-                return json(await all(db, 'SELECT * FROM tickets ORDER BY created_at DESC LIMIT 200'));
-            if (section === 'tickets' && method === 'POST') {
-                const b = await body(request);
-                if (!str(b.reply, 2000))
-                    fail(400, '请输入回复内容');
-                if (!await first(db, 'SELECT id FROM tickets WHERE id=?', str(b.id, 64)))
-                    fail(404, '工单不存在');
-                await db.batch([stmt(db, 'UPDATE tickets SET reply=?,status=?,updated_at=? WHERE id=?', str(b.reply, 2000), b.closed ? 'closed' : 'open', now(), str(b.id, 64)), audit(db, p.id, 'ticket.reply', str(b.id, 64))]);
-                return json({ ok: true });
-            }
-            if (section === 'settings' && method === 'GET')
-                return json(Object.fromEntries((await all<{
-                    key: string;
-                    value: string;
-                }>(db, 'SELECT * FROM settings')).map(s => [s.key, s.value])));
-            if (section === 'settings' && method === 'POST') {
-                const b = await body(request), keys = ['brand', 'tagline', 'announcement', 'support', 'businessHours', 'footer', 'terms', 'privacy'];
-                const statements = keys.filter(k => typeof b[k] === 'string').map(k => stmt(db, 'INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', k, str(b[k], 4000)));
-                await db.batch([...statements, audit(db, p.id, 'settings.save', 'site')]);
-                return json({ ok: true });
-            }
+            if(section==='tickets'&&method==='GET')return json(await all(db,'SELECT * FROM tickets ORDER BY created_at DESC LIMIT 200'));
+            if(section==='tickets'&&method==='POST'){const b=await body(request),id=str(b.id,64),reply=str(b.reply,2000);if(!reply)fail(400,'请输入回复内容');if(!await first(db,'SELECT id FROM tickets WHERE id=?',id))fail(404,'工单不存在');await db.batch([stmt(db,'UPDATE tickets SET reply=?,status=?,updated_at=? WHERE id=?',reply,b.closed?'closed':'open',now(),id),audit(db,p.id,'ticket.reply',id)]);return json({ok:true});}
+            if(section==='settings'&&method==='GET')return json(await settings(db));
+            if(section==='settings'&&method==='POST'){const b=await body(request),keys=['brand','tagline','announcement','support','telegramSupport','businessHours','footer','terms','privacy'];const username=str(b.telegramSupport,40).replace(/^@/,'');if(b.telegramSupport&& !/^[A-Za-z0-9_]{5,32}$/.test(username))fail(400,'Telegram 客服用户名需为 5–32 位字母、数字或下划线');const st=keys.filter(k=>typeof b[k]==='string').map(k=>stmt(db,'INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',k,k==='telegramSupport'?username:str(b[k],4000)));await db.batch([...st,audit(db,p.id,'settings.save','site')]);return json({ok:true});}
             if (section === 'staff' && method === 'GET')
                 return json(await all(db, 'SELECT id,username,role,active,created_at FROM staff'));
             if (section === 'staff' && method === 'POST') {
@@ -551,25 +269,10 @@ export async function handleApi(request: Request, env: RuntimeEnv): Promise<Resp
             }
             if (section === 'audits' && method === 'GET')
                 return json(await all(db, 'SELECT a.*, coalesce(s.username,a.actor) AS actor_name FROM audits a LEFT JOIN staff s ON a.actor=s.id ORDER BY a.created_at DESC LIMIT 200'));
-            if (section === 'seed' && method === 'POST') {
-                if (p.role !== 'owner')
-                    fail(403, '仅店主可以导入');
-                return json(await seed(db, env, p.id));
-            }
+            if(section==='seed'&&method==='POST')return json(await seed(db,env,p.id));
         }
-        fail(404, '接口不存在');
-    }
-    catch (error) {
-        if (error instanceof ApiError || error instanceof PaymentError || error instanceof SupplierError)
-            return json({ error: error.message }, error.status);
-        console.error('commerce request failed', error instanceof Error ? error.message : 'unknown');
-        return json({ error: '服务暂时不可用，请稍后重试或联系管理员' }, 500);
-    }
+        fail(404,'接口不存在');
+    }catch(error){if(error instanceof ApiError)return json({error:error.message},error.status);console.error('commerce request failed',error instanceof Error?error.message:'unknown');return json({error:'服务暂时不可用，请稍后重试'},500);}
 }
-
-// Cloudflare Cron invokes this while customer pages are closed.
-export async function runPaymentReconciliation(env: RuntimeEnv) {
-    if (!env.DB) return;
-    try { if (env.DEMO_MODE !== 'true' && env.TRONGRID_API_KEY) await reconcilePayments(env, settleOrder); }
-    finally { await expire(env.DB); }
-}
+// No payment network requests until a real adapter is explicitly implemented.
+export async function runPaymentReconciliation(env:RuntimeEnv){if(env.DB)await expire(env.DB);}

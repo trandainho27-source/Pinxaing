@@ -73,14 +73,14 @@
     }
   },
   "packageManager": "pnpm@11.25.0",
-  "description": "Pinxiang 品享数字商品商城与商家管理系统",
+  "description": "Pinxiang 品享实体商品自助商城与商家管理系统",
   "cloudflare": {
     "bindings": {
       "DB": {
-        "description": "存储商城商品、加密卡密、订单、售后和管理数据的 D1 数据库。"
+        "description": "存储实体商品、数量库存、加密赠送账号、订单、收货资料和售后的 D1 数据库。"
       },
       "INVENTORY_KEY": {
-        "description": "请填入自己生成的 64 位十六进制随机密钥。用于加密卡密，导入库存后不要更换。"
+        "description": "请填入自己生成的 64 位十六进制随机密钥。用于加密 Telegram 赠送账号及历史内容，导入后不要更换。"
       },
       "BOOTSTRAP_TOKEN": {
         "description": "请填入自己生成的随机初始化令牌。首次打开 /admin 创建店主账号时使用，完成后删除。"

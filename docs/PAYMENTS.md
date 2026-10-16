@@ -1,28 +1,27 @@
-# 支付接入现状
+# 微信、支付宝、USDT 接口预留
 
-当前独立演示站没有接通真实收款。支持 TRON 主网 TRC20 USDT 的服务端核验适配；只有正式环境且配置完整时才展示真实收银台。不会索要钱包私钥或助记词。
+三个方式统一预留，当前全部未接通，不生成付款二维码、收款地址或真实付款单。客户可以在下单时选择付款方式，这只是订单上的意向记录。
 
-## 配置项
+## 接口契约
 
-| Cloudflare 变量 | 设置 |
+| 接口 | 当前响应 |
 | --- | --- |
-| `DEMO_MODE` | `false` |
-| `PAYMENT_PROVIDER` | `trc20` |
-| `TRON_RECEIVING_ADDRESS` | 商家自己的有效 TRON 地址 |
-| `USDT_CNY_RATE` | 商家确定的人民币报价汇率 |
-| `TRONGRID_API_KEY` | TronGrid 查询 API 密钥，作为 Secret |
-| `INVENTORY_KEY` | 已配置的库存加密 Secret |
+| `GET /api/payments/methods` | `wechat`、`alipay`、`usdt`，均 `enabled: false`、`status: reserved` |
+| `POST /api/payments/create` | 校验订单号及密钥，接收 `method`，返回 HTTP 503、`status: unavailable` |
+| `POST /api/payments/check` | HTTP 503，尚未接入 |
+| `POST /api/payments/webhook` 及其子路径 | HTTP 503，尚未接入，不更改订单 |
+| `GET /api/admin/payment` | 店主查看三种方式的预留状态 |
 
-配置后后台「支付接口」显示就绪状态。生成支付单后锁定汇率，并使用最多 0.009999 USDT 的识别尾差区分订单。页面明确显示完整金额；客户需要一次性准确转账。转账手续费另计。
+`lib/commerce/payment-providers.ts` 定义统一的支付方式、创建请求与未接入响应。创建请求使用服务端订单 ID、人民币分整数金额、`currency: CNY` 和支付方式。未来 USDT 适配器需要明确网络、汇率、精度和订单报价有效期；不能把人民币分直接当成 USDT 数量。
 
-付款确认只接受官方 USDT 合约、正确收款地址、完整金额、成功且已确认的交易；同一交易不能重复交付。金额不匹配或超时到账进入人工核对，不自动恢复已过期订单。付款页可提交交易哈希补查；钱包密码和私钥不需要提供。
+## 后续接入要求
 
-必须完成自己账户的小额实际交易验收，包括正常到账、重复核验、超时和异常处理。本轮仅运行模拟链上响应测试，未验证实际收款地址、API 配额或真实到账。
+未来对应商户或服务商确定后，再为统一契约实现创建、查询和回调适配，增加自己的凭据、安全验签与实际支付验收。付款金额必须包含不可取消的 20 元邮费，并以服务端订单为准。同一支付流水不能归属多个订单，重复回调不能重复扣减库存。
 
-## 其他支付方式
+付款成功只把实体订单从待付款变为已付款，配送仍为待发货。物流单号由店主或运营另行登记；支付适配器不能自动标为发货。
 
-代码还保留自定义 HMAC 支付通知接口，用于未来的网关对接；它不是已接通的微信 / 支付宝收银台。微信、支付宝或银行卡要根据实际商户账户另行接入和验收。
+旧 TRC20、HMAC 和支付巡检代码保留在历史模块中，以保护原版本回归和历史查询。新 API 不调用这些适配器；即使部署中仍存在旧的 `PAYMENT_PROVIDER` 等变量，也不会启用付款或网络巡检。不要依据旧版本的配置说明直接开通收款。
 
-接口 `/api/payments/webhook` 使用 `x-payment-timestamp`（秒级时间戳）和 `x-payment-signature`（HMAC-SHA256）。签名内容为 `timestamp + '.' + 原始JSON`，Secret 为 `PAYMENT_WEBHOOK_SECRET`，通道为 `PAYMENT_PROVIDER=custom-hmac`。JSON 包含 `orderId`、`transactionId`、`amount`（人民币分）、`currency=CNY`、`status=paid`。服务端校验 5 分钟时间窗口、订单金额与交易唯一性。此适配尚无对应顾客收银台。
+## 演示和线下登记
 
-后台退款只记录已退款的结果，不发送资金。
+`DEMO_MODE=true` 才能使用模拟确认付款。正式模式拒绝该接口。店主手工确认收款只登记实际已经核对的到账记录；退款按钮也只登记实际已经完成的退款，不发送资金。完整真实付款与退款集成留待后续接入。

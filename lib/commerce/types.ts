@@ -12,6 +12,8 @@ export interface RuntimeEnv {
     DIDIPIFA_PURCHASE_ENABLED?: string;
 }
 export interface Product {
+    product_type?: string;
+    image_url?: string;
     id: string;
     category_id: string;
     name: string;
@@ -47,6 +49,16 @@ export interface Staff {
     csrf?: string;
 }
 export interface Order {
+    order_type?: string;
+    subtotal?: number;
+    shipping_fee?: number;
+    recipient?: string;
+    shipping_address?: string;
+    shipping_status?: string;
+    tracking_number?: string;
+    shipped_at?: number | null;
+    payment_method?: string;
+    telegram_gift?: string | null;
     id: string;
     contact: string;
     total: number;
@@ -91,6 +103,9 @@ export interface Ticket {
     created_at: number;
 }
 export interface Catalog {
+    shippingFee?: number;
+    giftAvailable?: boolean;
+    paymentMethods?: {id:string;name:string;enabled:boolean;status:string}[];
     products: Product[];
     categories: Category[];
     settings: Record<string, string>;
