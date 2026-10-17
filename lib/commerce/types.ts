@@ -59,6 +59,7 @@ export interface Order {
     shipped_at?: number | null;
     payment_method?: string;
     telegram_gift?: string | null;
+    telegram_gift_unlocked?: boolean;
     id: string;
     contact: string;
     total: number;

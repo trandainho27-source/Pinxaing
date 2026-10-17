@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, readdirSync } from 'node:fs';
 import { handleApi, reservationGuard, settleOrder } from '../lib/commerce/api.ts';
 import { encrypt, decrypt, hmac } from '../lib/commerce/security.ts';
+import {shipmentDisplay} from '../lib/commerce/order-display.ts';
 import {handleApi as legacyApi} from '../lib/commerce/legacy-api.ts';
 import { runPaymentReconciliation } from '../lib/commerce/api.ts';
 class Query {
@@ -92,23 +93,25 @@ test('physical catalog has mandatory shipping and three disabled uniform payment
 });
 test('optional address, recipient and contact can be empty; server charges exactly one fixed shipping fee',async()=>{
  const s=await fixture();const result=await s.req('orders',orderBody(s.p.id,2,{shipping_fee:0,total:1,subtotal:1,price:1,freeShipping:true}));
- assert.equal(result.r.status,201,JSON.stringify(result.d));const o=result.d;assert.equal(o.contact,'');assert.equal(o.recipient,'');assert.equal(o.shipping_address,'');assert.equal(o.subtotal,s.p.price*2);assert.equal(o.shipping_fee,2000);assert.equal(o.total,s.p.price*2+2000);assert.equal(o.status,'pending');assert.equal(o.shipping_status,'pending');assert.match(o.telegram_gift,/DEMO-TELEGRAM/);assert.equal(stock(s).available,18);assert.equal(stock(s).reserved,2);
+ assert.equal(result.r.status,201,JSON.stringify(result.d));const o=result.d;assert.equal(o.contact,'');assert.equal(o.recipient,'');assert.equal(o.shipping_address,'');assert.equal(o.subtotal,s.p.price*2);assert.equal(o.shipping_fee,2000);assert.equal(o.total,s.p.price*2+2000);assert.equal(o.status,'pending');assert.equal(o.shipping_status,'pending');assert.equal(o.telegram_gift,null);assert.equal(o.telegram_gift_unlocked,false);assert.equal(stock(s).available,18);assert.equal(stock(s).reserved,2);
  const second=s.catalog.products[1];const multi=await s.req('orders',{acceptedTerms:true,payment_method:'usdt',items:[{id:s.p.id,quantity:1},{id:second.id,quantity:2}],contact:' 联系人 ',recipient:' 姓名 ',shipping_address:' 收货地址 '});assert.equal(multi.d.shipping_fee,2000);assert.equal(multi.d.total,s.p.price+second.price*2+2000);assert.equal(multi.d.contact,'联系人');assert.equal(multi.d.payment_method,'usdt');
 });
-test('one gift is assigned on creation, encrypted at rest and disclosed only with correct order credentials',async()=>{
+test('gift is encrypted and reserved on creation but only disclosed after payment and correct credentials',async()=>{
  const s=await fixture(),o=(await s.req('orders',orderBody(s.p.id))).d;
  assert.equal(o.status,'pending');const gift=scalar(s,'SELECT * FROM telegram_gifts WHERE order_id=?',o.id);assert.equal(gift.status,'assigned');assert.ok(!gift.ciphertext.includes('DEMO-'));
- assert.equal(await decrypt(gift.ciphertext,s.env.INVENTORY_KEY,'pinxiang-telegram-gift'),o.telegram_gift);
+ const plaintext=await decrypt(gift.ciphertext,s.env.INVENTORY_KEY,'pinxiang-telegram-gift');assert.equal(o.telegram_gift,null);assert.equal(o.telegram_gift_unlocked,false);assert.ok(!JSON.stringify(o).includes(plaintext));
  await assert.rejects(decrypt(gift.ciphertext,s.env.INVENTORY_KEY,'another-context'));
  assert.equal((await s.req('orders/lookup',{id:o.id,secret:'wrong'})).r.status,404);
- assert.equal((await s.req('orders/lookup',credential(o))).d.telegram_gift,o.telegram_gift);assert.equal(o.lookup_hash,undefined);assert.equal(o.checkout_hash,undefined);
+ assert.equal((await s.req('orders/lookup',credential(o))).d.telegram_gift,null);assert.equal(o.lookup_hash,undefined);assert.equal(o.checkout_hash,undefined);
+ const paid=(await s.req('orders/demo-pay',credential(o))).d;assert.equal(paid.telegram_gift,plaintext);assert.equal(paid.telegram_gift_unlocked,true);assert.equal(paid.shipping_status,'pending');
+ assert.equal((await s.req('orders/lookup',credential(o))).d.telegram_gift,plaintext);assert.equal((await s.req('orders/lookup',{id:o.id,secret:'wrong'})).r.status,404);
  assert.equal((await s.req('admin/gifts')).r.status,401);await s.req('auth/demo',{});
- const admin=await s.req('admin/gifts');assert.ok(!JSON.stringify(admin.d).includes(o.telegram_gift));assert.ok(!JSON.stringify(admin.d).includes('ciphertext'));
+ const admin=await s.req('admin/gifts');assert.ok(!JSON.stringify(admin.d).includes(plaintext));assert.ok(!JSON.stringify(admin.d).includes('ciphertext'));
  const detail=(await s.req('admin/order?id='+o.id)).d;assert.equal(detail.giftAssigned,true);assert.equal(detail.lookup_hash,undefined);assert.equal(detail.telegram_gift,undefined);
 });
 test('stable checkout token makes simultaneous retries idempotent and rejects altered payloads',async()=>{
  const s=await fixture(),b=orderBody(s.p.id,2,{checkoutToken:'c'.repeat(64)});
- const results=await Promise.all(Array.from({length:4},()=>s.req('orders',b)));for(const r of results)assert.equal(r.r.status,201,JSON.stringify(r.d));assert.equal(new Set(results.map(r=>r.d.id)).size,1);assert.equal(new Set(results.map(r=>r.d.telegram_gift)).size,1);
+ const results=await Promise.all(Array.from({length:4},()=>s.req('orders',b)));for(const r of results)assert.equal(r.r.status,201,JSON.stringify(r.d));assert.equal(new Set(results.map(r=>r.d.id)).size,1);assert.ok(results.every(r=>r.d.telegram_gift===null&&r.d.telegram_gift_unlocked===false));
  assert.equal(scalar(s,'SELECT count(*) AS n FROM orders').n,1);assert.equal(scalar(s,"SELECT count(*) AS n FROM telegram_gifts WHERE status='assigned'").n,1);assert.equal(stock(s).available,18);
  assert.equal((await s.req('orders',{...b,contact:'changed'})).r.status,409);
  assert.equal((await s.req('orders',orderBody(s.p.id,1,{checkoutToken:'invalid'}))).r.status,400);
@@ -132,11 +135,11 @@ test('cancel and expiry release physical stock exactly once while gifts remain a
  assert.equal((await s.req('orders/cancel',credential(o))).r.status,200);assert.equal((await s.req('orders/cancel',credential(o))).r.status,200);assert.equal(stock(s).available,20);assert.equal(stock(s).reserved,0);assert.equal(scalar(s,'SELECT status FROM telegram_gifts WHERE order_id=?',o.id).status,'assigned');
  const pending=(await s.req('orders',orderBody(s.p.id,3))).d;s.db.raw.prepare('UPDATE orders SET expires_at=? WHERE id=?').run(Date.now()-1,pending.id);
  await runPaymentReconciliation(s.env);await runPaymentReconciliation(s.env);assert.equal(stock(s).available,20);assert.equal(stock(s).reserved,0);assert.equal(scalar(s,'SELECT status FROM orders WHERE id=?',pending.id).status,'expired');assert.equal(scalar(s,"SELECT count(*) AS n FROM telegram_gifts WHERE status='assigned'").n,2);
- assert.equal((await s.req('orders/demo-pay',credential(pending))).r.status,409);
+ assert.equal((await s.req('orders/demo-pay',credential(pending))).r.status,409);for(const closed of [o,pending]){const found=(await s.req('orders/lookup',credential(closed))).d;assert.equal(found.telegram_gift,null);assert.equal(found.telegram_gift_unlocked,false);}
 });
 test('confirmation commits stock once and leaves physical order awaiting shipment',async()=>{
  const s=await fixture(),o=(await s.req('orders',orderBody(s.p.id,2))).d;
- const paid=await s.req('orders/demo-pay',credential(o));assert.equal(paid.r.status,200);assert.equal(paid.d.status,'paid');assert.equal(paid.d.shipping_status,'pending');assert.equal(paid.d.tracking_number,'');assert.equal(paid.d.telegram_gift,o.telegram_gift);assert.equal(paid.d.delivery,undefined);
+ const paid=await s.req('orders/demo-pay',credential(o));assert.equal(paid.r.status,200);assert.equal(paid.d.status,'paid');assert.equal(paid.d.shipping_status,'pending');assert.equal(paid.d.tracking_number,'');assert.match(paid.d.telegram_gift,/DEMO-TELEGRAM/);assert.equal(paid.d.telegram_gift_unlocked,true);assert.equal(paid.d.delivery,undefined);
  assert.equal((await s.req('orders/demo-pay',credential(o))).d.status,'paid');assert.equal(stock(s).sold,2);assert.equal(stock(s).reserved,0);assert.equal(stock(s).available,18);assert.equal((await s.req('orders/cancel',credential(o))).r.status,409);
 });
 test('payment confirmation requires full amount including shipping and unique provider reference',async()=>{
@@ -181,7 +184,7 @@ test('gift import deduplicates account identity, authenticates encryption, and e
 test('production requires non-example gift inventory and never exposes demo catalog or demo payment',async()=>{
  const s=await fixture();await s.req('auth/demo',{});s.env.DEMO_MODE='false';assert.equal((await s.req('catalog')).d.products.length,0);assert.equal((await s.req('orders',orderBody(s.p.id))).r.status,400);
  s.db.raw.prepare('UPDATE products SET is_example=0 WHERE id=?').run(s.p.id);assert.equal((await s.req('orders',orderBody(s.p.id))).r.status,409);
- await s.req('admin/gifts',{codes:'REAL-POOL-TEST-FIXTURE | test-only-password'});const o=(await s.req('orders',orderBody(s.p.id))).d;assert.equal(o.demo,0);assert.equal(o.telegram_gift,'REAL-POOL-TEST-FIXTURE | test-only-password');assert.equal((await s.req('orders/demo-pay',credential(o))).r.status,403);
+ await s.req('admin/gifts',{codes:'REAL-POOL-TEST-FIXTURE | test-only-password'});const o=(await s.req('orders',orderBody(s.p.id))).d;assert.equal(o.demo,0);assert.equal(o.telegram_gift,null);assert.equal(o.telegram_gift_unlocked,false);await s.req('admin/orders',{id:o.id,reference:'real-fixture-manual',reason:'隔离测试登记已收款'});assert.equal((await s.req('orders/lookup',credential(o))).d.telegram_gift,'REAL-POOL-TEST-FIXTURE | test-only-password');assert.equal((await s.req('orders/demo-pay',credential(o))).r.status,403);
 });
 test('all payment placeholders fail closed despite historical configuration and make no outbound requests',async t=>{
  const s=await fixture();let outbound=0;t.mock.method(globalThis,'fetch',async()=>{outbound++;throw Error('No payment network permitted');});
@@ -198,7 +201,7 @@ test('inventory adjustment cannot consume locked stock; product images reject un
 });
 test('refund registration preserves gift assignment and does not silently restock returned merchandise',async()=>{
  const s=await fixture();await s.req('auth/demo',{});const o=(await s.req('orders',orderBody(s.p.id))).d;await s.req('orders/demo-pay',credential(o));
- assert.equal((await s.req('admin/orders',{id:o.id,action:'refund',reference:'refund-001',reason:'已经在支付平台退回'})).r.status,200);assert.equal((await s.req('orders/lookup',credential(o))).d.status,'refunded');assert.equal(stock(s).sold,1);assert.equal(stock(s).available,19);assert.equal(scalar(s,'SELECT status FROM telegram_gifts WHERE order_id=?',o.id).status,'assigned');
+ assert.equal((await s.req('admin/orders',{id:o.id,action:'refund',reference:'refund-001',reason:'已经在支付平台退回'})).r.status,200);const refunded=(await s.req('orders/lookup',credential(o))).d;assert.equal(refunded.status,'refunded');assert.equal(refunded.telegram_gift_unlocked,true);assert.match(refunded.telegram_gift,/DEMO-TELEGRAM/);assert.equal(stock(s).sold,1);assert.equal(stock(s).available,19);assert.equal(scalar(s,'SELECT status FROM telegram_gifts WHERE order_id=?',o.id).status,'assigned');
 });
 test('customer tickets persist and require the order secret',async()=>{
  const s=await fixture(),o=(await s.req('orders',orderBody(s.p.id))).d;assert.equal((await s.req('tickets',{orderId:o.id,secret:'wrong',subject:'补充地址',message:'请协助补充收货信息'})).r.status,404);
@@ -210,4 +213,31 @@ test('legacy records remain queryable without exposing old commerce write routes
  for(const file of readdirSync('drizzle').filter(f=>f.endsWith('.sql')).sort().slice(6))s.db.raw.exec(readFileSync('drizzle/'+file,'utf8'));
  const found=await s.req('orders/lookup',credential(o));assert.equal(found.r.status,200,JSON.stringify(found.d));assert.equal(found.d.order_type,'digital');assert.equal(found.d.delivery.length,1);assert.equal((await s.req('orders/cancel',credential(o))).r.status,409);
  const fresh=(await s.req('catalog')).d;assert.ok(fresh.products.every((p:any)=>p.product_type==='physical'));assert.equal(fresh.settings.brand,'自定义品牌');assert.match(fresh.settings.announcement,/实体商品/);assert.match(fresh.settings.privacy,/收货地址/);
+});
+
+test('unpaid responses and checkout replay cannot leak gifts through spoofed payment fields or missing payment evidence',async()=>{
+ const s=await fixture(),payload=orderBody(s.p.id,1,{checkoutToken:'b'.repeat(64),status:'paid',paid_at:Date.now(),telegram_gift_unlocked:true});
+ const o=(await s.req('orders',payload)).d;assert.equal(o.status,'pending');assert.equal(o.telegram_gift,null);
+ const key=s.env.INVENTORY_KEY;delete s.env.INVENTORY_KEY;
+ for(const path of ['orders','orders/lookup']){
+  const r=await s.req(path,path==='orders'?payload:{...credential(o),status:'paid',paid_at:Date.now(),telegram_gift_unlocked:true});
+  assert.equal(r.r.status,path==='orders'?201:200);assert.equal(r.d.telegram_gift,null);assert.equal(r.d.telegram_gift_unlocked,false);assert.ok(!JSON.stringify(r.d).includes('DEMO-TELEGRAM'));assert.equal(r.r.headers.get('cache-control'),'no-store');
+ }
+ s.env.INVENTORY_KEY=key;
+ s.db.raw.prepare("UPDATE orders SET status='paid',paid_at=NULL WHERE id=?").run(o.id);assert.equal((await s.req('orders/lookup',credential(o))).d.telegram_gift,null);
+ s.db.raw.prepare("UPDATE orders SET status='pending',paid_at=? WHERE id=?").run(Date.now(),o.id);assert.equal((await s.req('orders/lookup',credential(o))).d.telegram_gift,null);
+ s.db.raw.prepare('UPDATE orders SET paid_at=NULL WHERE id=?').run(o.id);
+ const paid=(await s.req('orders/demo-pay',credential(o))).d;const replay=(await s.req('orders',payload)).d;assert.equal(replay.id,o.id);assert.equal(replay.telegram_gift,paid.telegram_gift);assert.equal(replay.telegram_gift_unlocked,true);
+});
+test('empty or absent tracking numbers always display unshipped and a real number is returned in the order query',async()=>{
+ for(const value of [undefined,null,'','  ','无',' 无 '])assert.deepEqual(shipmentDisplay(value),{trackingNumber:'',shipped:false,label:'未发货'});
+ const s=await fixture(),o=(await s.req('orders',orderBody(s.p.id))).d;
+ for(const value of ['','  ','无']){s.db.raw.prepare("UPDATE orders SET shipping_status='shipped',tracking_number=? WHERE id=?").run(value,o.id);const found=(await s.req('orders/lookup',credential(o))).d;assert.equal(found.shipping_status,'pending');assert.equal(found.tracking_number,'');assert.equal(found.telegram_gift,null);}
+ s.db.raw.prepare("UPDATE orders SET shipping_status='pending',tracking_number=' SF12345678 ' WHERE id=?").run(o.id);const found=(await s.req('orders/lookup',credential(o))).d;assert.equal(found.shipping_status,'shipped');assert.equal(found.tracking_number,'SF12345678');assert.equal(shipmentDisplay(found.tracking_number).label,'已发货');assert.equal(found.telegram_gift,null);
+});
+test('previous demo copy updates to payment-only disclosure without reseeding accounts or changing custom copy',async()=>{
+ const s=await fixture();s.db.raw.exec("DELETE FROM settings WHERE key='gift_payment_copy_v2'");
+ s.db.raw.prepare("UPDATE settings SET value=? WHERE key='announcement'").run('实体商品自助下单，每单固定邮费 ¥20；地址和联系方式可留空，下单赠 Telegram 客服及售后通讯账号。');
+ s.db.raw.prepare("UPDATE settings SET value='自定义客服说明' WHERE key='support'").run();
+ const catalog=(await s.req('catalog')).d;assert.match(catalog.settings.announcement,/付款成功后显示/);assert.equal(catalog.settings.support,'自定义客服说明');assert.equal(scalar(s,'SELECT count(*) AS n FROM telegram_gifts').n,30);
 });

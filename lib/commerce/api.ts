@@ -4,6 +4,7 @@ import {ApiError,fail,now,json,str,integer,body,database,stmt,all,first,audit,li
 import {categorySeed,productSeed} from './seed.ts';
 import {paymentMethods,reservedPayment,type PaymentMethod} from './payment-providers.ts';
 import {lookup as lookupHistoricalOrder} from './legacy-api.ts';
+import {giftIsUnlocked,shipmentDisplay} from './order-display.ts';
 export const SHIPPING_FEE = 2000;
 const GIFT_CONTEXT = 'pinxiang-telegram-gift';
 const categoryQuery = `SELECT c.* FROM categories c WHERE NOT EXISTS(SELECT 1 FROM products p WHERE p.category_id=c.id AND p.product_type='digital') OR EXISTS(SELECT 1 FROM products p WHERE p.category_id=c.id AND p.product_type='physical') ORDER BY c.sort`;
@@ -19,25 +20,38 @@ async function expire(db:D1Database) {
     await db.batch([stmt(db,"UPDATE orders SET status='expired' WHERE status='pending' AND expires_at<?",now()),...releaseStock(db),stmt(db,"UPDATE inventory SET status='available',order_id=NULL WHERE status='reserved' AND order_id IN(SELECT id FROM orders WHERE status IN('expired','cancelled'))"),stmt(db,'DELETE FROM sessions WHERE expires_at<?',now()),stmt(db,'DELETE FROM rate_limits WHERE reset_at<?',now())]);
 }
 async function settings(db:D1Database) {return Object.fromEntries((await all(db,'SELECT * FROM settings')).map(x=>[x.key,x.value]));}
+async function refreshDemoGiftCopy(db:D1Database) {
+    if(await first(db,"SELECT key FROM settings WHERE key='gift_payment_copy_v2'"))return;
+    const updates=[
+        ['announcement','实体商品自助下单，每单固定邮费 ¥20；地址和联系方式可留空，下单赠 Telegram 客服及售后通讯账号。','实体商品自助下单，每单固定邮费 ¥20；地址和联系方式可留空，付款成功后显示赠送的加密通讯账号。'],
+        ['support','可使用订单中的 Telegram 赠送账号联系客服，或提交售后工单。','付款后可使用订单中的赠送账号联系客服；付款前后均可提交订单工单。'],
+        ['terms','本商城售卖实体商品。每笔订单固定收取 20 元邮费，不可取消。地址和联系方式可留空，发货前请通过客服补充。每单赠送一个 Telegram 通讯账号用于联系客服和售后。已展示的赠送账号不会因取消订单而回收。退款与退换货请联系商家。','本商城售卖实体商品。每笔订单固定收取 20 元邮费，不可取消。地址和联系方式可留空，发货前请通过客服补充。每单赠送一个加密通讯账号用于联系客服和售后，付款成功后才显示账号内容。已展示的赠送账号不会因取消订单而回收。退款与退换货请联系商家。']
+    ];
+    await db.batch([
+        ...updates.map(([key,old,value])=>stmt(db,'UPDATE settings SET value=? WHERE key=? AND value=?',value,key,old)),
+        stmt(db,"UPDATE products SET instructions=? WHERE product_type='physical' AND is_example=1 AND instructions=?",'每单固定邮费 ¥20，不可取消。收货地址及联系方式可留空，付款后可查看赠送的加密通讯账号，用于联系客服补充；付款前可提交订单工单。','每单固定邮费 ¥20，不可取消。收货地址及联系方式可留空，下单后可通过赠送的 Telegram 账号联系客服补充。'),
+        stmt(db,"INSERT OR IGNORE INTO settings VALUES('gift_payment_copy_v2','1')")
+    ]);
+}
 async function seed(db:D1Database,env:RuntimeEnv,actor:string) {
     if(env.DEMO_MODE!=='true')fail(403,'正式环境不能导入演示内容');
     if(!env.INVENTORY_KEY)fail(503,'赠送账号加密密钥未配置');
-    if(await first(db,"SELECT key FROM settings WHERE key='physical_demo_seeded'"))return {ok:true};
+    if(await first(db,"SELECT key FROM settings WHERE key='physical_demo_seeded'")){await refreshDemoGiftCopy(db);return {ok:true};}
     const st:D1PreparedStatement[]=[],ts=now();
     categorySeed.forEach(([id,name,icon],i)=>st.push(stmt(db,'INSERT OR IGNORE INTO categories VALUES(?,?,?,?,1)',id,name,icon,i)));
     for(const [id,category,name,subtitle,icon,price] of productSeed){
-        st.push(stmt(db,`INSERT OR IGNORE INTO products(id,category_id,name,subtitle,description,instructions,price,compare_price,min_qty,max_qty,featured,active,region,tag,is_example,created_at,product_type,icon_key) VALUES(?,?,?,?,?,?,?,0,1,20,1,1,'中国','生活精选',1,?,'physical',?)`,id,category,name,subtitle,'这是用于演示的实体商品，不会产生真实配送。正式经营时请替换成你的真实商品、材质、尺寸和图片。','每单固定邮费 ¥20，不可取消。收货地址及联系方式可留空，下单后可通过赠送的 Telegram 账号联系客服补充。',price,ts,icon));
+        st.push(stmt(db,`INSERT OR IGNORE INTO products(id,category_id,name,subtitle,description,instructions,price,compare_price,min_qty,max_qty,featured,active,region,tag,is_example,created_at,product_type,icon_key) VALUES(?,?,?,?,?,?,?,0,1,20,1,1,'中国','生活精选',1,?,'physical',?)`,id,category,name,subtitle,'这是用于演示的实体商品，不会产生真实配送。正式经营时请替换成你的真实商品、材质、尺寸和图片。','每单固定邮费 ¥20，不可取消。收货地址及联系方式可留空，付款后可查看赠送的加密通讯账号，用于联系客服补充；付款前可提交订单工单。',price,ts,icon));
         st.push(stmt(db,'INSERT OR IGNORE INTO physical_stock(product_id,available,reserved,sold) VALUES(?,20,0,0)',id));
     }
     for(let n=1;n<=30;n++){
         const content=`DEMO-TELEGRAM-${String(n).padStart(3,'0')} | 仅用于界面演示，不能登录 Telegram`;
         st.push(stmt(db,`INSERT OR IGNORE INTO telegram_gifts(id,ciphertext,fingerprint,status,is_example,created_at) VALUES(?,?,?,'available',1,?)`,uid(),await encrypt(content,env.INVENTORY_KEY!,GIFT_CONTEXT),await sha('demo-gift-'+n),ts));
     }
-    const defaults={brand:'品享',tagline:'精选日常好物，让生活多一点喜欢。',announcement:'实体商品自助下单，每单固定邮费 ¥20；地址和联系方式可留空，下单赠 Telegram 客服及售后通讯账号。',support:'可使用订单中的 Telegram 赠送账号联系客服，或提交售后工单。',telegramSupport:'',businessHours:'工作日 09:00–18:00',footer:'日常好物，自助选购',terms:'本商城售卖实体商品。每笔订单固定收取 20 元邮费，不可取消。地址和联系方式可留空，发货前请通过客服补充。每单赠送一个 Telegram 通讯账号用于联系客服和售后。已展示的赠送账号不会因取消订单而回收。退款与退换货请联系商家。',privacy:'收货地址和联系方式均可选填，仅用于订单配送与售后。订单密钥用于访问订单和赠送账号，请妥善保存。'};
+    const defaults={brand:'品享',tagline:'精选日常好物，让生活多一点喜欢。',announcement:'实体商品自助下单，每单固定邮费 ¥20；地址和联系方式可留空，付款成功后显示赠送的加密通讯账号。',support:'付款后可使用订单中的赠送账号联系客服；付款前后均可提交订单工单。',telegramSupport:'',businessHours:'工作日 09:00–18:00',footer:'日常好物，自助选购',terms:'本商城售卖实体商品。每笔订单固定收取 20 元邮费，不可取消。地址和联系方式可留空，发货前请通过客服补充。每单赠送一个加密通讯账号用于联系客服和售后，付款成功后才显示账号内容。已展示的赠送账号不会因取消订单而回收。退款与退换货请联系商家。',privacy:'收货地址和联系方式均可选填，仅用于订单配送与售后。订单密钥用于访问订单和赠送账号，请妥善保存。'};
     const oldDefaults:Record<string,string>={tagline:'好工具，好灵感，好好享受数字生活。',announcement:'欢迎体验品享。这是独立演示商城，示例商品用于体验购买与交付，不收取真实款项。',footer:'数字商品交付平台',terms:'购买前请确认商品说明、适用地区及使用条件。数字商品交付后，如有质量问题请凭订单号提交售后工单。',support:'请通过订单页面提交售后工单',privacy:'仅收集履行订单必需的联系信息。查询密钥用于验证订单访问权限。联系信息仅供客服处理订单使用。'};
     for(const [key,value] of Object.entries(defaults))st.push(stmt(db,`INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE settings.value=?`,key,value,oldDefaults[key]??value));
     st.push(stmt(db,"INSERT OR IGNORE INTO settings VALUES('physical_demo_seeded','1')"),audit(db,actor,'physical.demo.seed','catalog'));
-    await db.batch(st);return {ok:true};
+    await db.batch(st);await refreshDemoGiftCopy(db);return {ok:true};
 }
 async function catalog(db:D1Database,env:RuntimeEnv){
     if(env.DEMO_MODE==='true')await seed(db,env,'system');await expire(db);
@@ -48,8 +62,9 @@ async function lookup(db:D1Database,env:RuntimeEnv,id:string,secret:string):Prom
     if(!row || !safeEqual(await sha(secret),row.lookup_hash))fail(404,'订单号或查询密钥不正确');
     if(row.order_type!=='physical')return lookupHistoricalOrder(db,env,id,secret);
     const {lookup_hash,checkout_hash,checkout_payload_hash,...order}=row;
-    const gift=await first<any>(db,'SELECT ciphertext FROM telegram_gifts WHERE order_id=?',id);
-    return {...order,items:await all(db,'SELECT product_id,product_name,price,quantity FROM order_items WHERE order_id=?',id),tickets:await all(db,'SELECT * FROM tickets WHERE order_id=? ORDER BY created_at DESC',id),telegram_gift:gift?await decrypt(gift.ciphertext,env.INVENTORY_KEY!,GIFT_CONTEXT):null};
+    const unlocked=giftIsUnlocked(row),shipment=shipmentDisplay(row.tracking_number);
+    const gift=unlocked?await first<any>(db,'SELECT ciphertext FROM telegram_gifts WHERE order_id=?',id):null;
+    return {...order,shipping_status:shipment.shipped?'shipped':'pending',tracking_number:shipment.trackingNumber,telegram_gift_unlocked:unlocked,items:await all(db,'SELECT product_id,product_name,price,quantity FROM order_items WHERE order_id=?',id),tickets:await all(db,'SELECT * FROM tickets WHERE order_id=? ORDER BY created_at DESC',id),telegram_gift:gift?await decrypt(gift.ciphertext,env.INVENTORY_KEY!,GIFT_CONTEXT):null};
 }
 export function reservationGuard(db:D1Database,orderId:string){
     return guard(db,`EXISTS(SELECT 1 FROM orders o WHERE o.id=? AND o.order_type='physical' AND o.status='pending' AND o.shipping_fee=2000 AND o.total=o.subtotal+2000
