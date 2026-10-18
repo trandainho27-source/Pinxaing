@@ -6,3 +6,10 @@ INVENTORY_KEY=
 BOOTSTRAP_TOKEN=
 # WeChat, Alipay and USDT are reserved only; no payment secrets are required in this version.
 # Real integrations must be implemented and verified later. See docs/PAYMENTS.md.
+
+# Optional real customer email login. Never commit real API keys.
+# Verify your sending domain with Resend before using EMAIL_FROM.
+RESEND_API_KEY=
+EMAIL_FROM=
+# DEMO_MODE=true exposes a separate, labelled test-email flow. Keep false for real stores.
+DEMO_MODE=false

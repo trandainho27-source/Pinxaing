@@ -1,10 +1,12 @@
-import type { RuntimeEnv, Product, Order, Staff } from './types.ts';
+import type { RuntimeEnv, Product, Order, Staff, Customer } from './types.ts';
 import {uid,randomToken,sha,safeEqual,hashPassword,verifyPassword,encrypt,decrypt} from './security.ts';
 import {ApiError,fail,now,json,str,integer,body,database,stmt,all,first,audit,limit,authenticated,loginSession} from './api-common.ts';
 import {categorySeed,productSeed} from './seed.ts';
 import {paymentMethods,reservedPayment,type PaymentMethod} from './payment-providers.ts';
 import {lookup as lookupHistoricalOrder} from './legacy-api.ts';
 import {giftIsUnlocked,shipmentDisplay} from './order-display.ts';
+import {handleCustomerApi,customerSession,customerCsrf,emailReady} from './customer-api.ts';
+import {listOrders,orderDetail,manageOrders} from './order-management.ts';
 export const SHIPPING_FEE = 2000;
 const GIFT_CONTEXT = 'pinxiang-telegram-gift';
 const categoryQuery = `SELECT c.* FROM categories c WHERE NOT EXISTS(SELECT 1 FROM products p WHERE p.category_id=c.id AND p.product_type='digital') OR EXISTS(SELECT 1 FROM products p WHERE p.category_id=c.id AND p.product_type='physical') ORDER BY c.sort`;
@@ -17,7 +19,7 @@ function releaseStock(db:D1Database) {
     stmt(db,`UPDATE physical_reservations SET status='released' WHERE status='reserved' AND order_id IN(SELECT id FROM orders WHERE status IN('expired','cancelled'))`)];
 }
 async function expire(db:D1Database) {
-    await db.batch([stmt(db,"UPDATE orders SET status='expired' WHERE status='pending' AND expires_at<?",now()),...releaseStock(db),stmt(db,"UPDATE inventory SET status='available',order_id=NULL WHERE status='reserved' AND order_id IN(SELECT id FROM orders WHERE status IN('expired','cancelled'))"),stmt(db,'DELETE FROM sessions WHERE expires_at<?',now()),stmt(db,'DELETE FROM rate_limits WHERE reset_at<?',now())]);
+    await db.batch([stmt(db,"UPDATE orders SET status='expired',revision=revision+1 WHERE status='pending' AND expires_at<?",now()),...releaseStock(db),stmt(db,"UPDATE inventory SET status='available',order_id=NULL WHERE status='reserved' AND order_id IN(SELECT id FROM orders WHERE status IN('expired','cancelled'))"),stmt(db,'DELETE FROM sessions WHERE expires_at<?',now()),stmt(db,'DELETE FROM rate_limits WHERE reset_at<?',now()),stmt(db,'DELETE FROM customer_sessions WHERE expires_at<?',now()),stmt(db,'DELETE FROM email_challenges WHERE created_at<?',now()-86400000)]);
 }
 async function settings(db:D1Database) {return Object.fromEntries((await all(db,'SELECT * FROM settings')).map(x=>[x.key,x.value]));}
 async function refreshDemoGiftCopy(db:D1Database) {
@@ -57,11 +59,11 @@ async function catalog(db:D1Database,env:RuntimeEnv){
     if(env.DEMO_MODE==='true')await seed(db,env,'system');await expire(db);
     return {products:await all(db,productQuery+` WHERE p.product_type='physical' AND p.active=1 ${env.DEMO_MODE==='true'?'':'AND p.is_example=0'} AND p.category_id IN(SELECT id FROM categories WHERE active=1) ORDER BY p.featured DESC,p.created_at DESC`),categories:await all(db,`SELECT * FROM categories c WHERE c.active=1 AND EXISTS(SELECT 1 FROM products p WHERE p.category_id=c.id AND p.product_type='physical' AND p.active=1 ${env.DEMO_MODE==='true'?'':'AND p.is_example=0'}) ORDER BY c.sort`),settings:await settings(db),demo:env.DEMO_MODE==='true',paymentEnabled:false,paymentMethods,shippingFee:SHIPPING_FEE,giftAvailable:!!await first(db,"SELECT id FROM telegram_gifts WHERE status='available' AND is_example=? LIMIT 1",env.DEMO_MODE==='true'?1:0)};
 }
-async function lookup(db:D1Database,env:RuntimeEnv,id:string,secret:string):Promise<any>{
+async function lookup(db:D1Database,env:RuntimeEnv,id:string,secret:string,customer?:Customer|null):Promise<any>{
     const row=await first<any>(db,'SELECT * FROM orders WHERE id=? AND ready=1',id);
-    if(!row || !safeEqual(await sha(secret),row.lookup_hash))fail(404,'订单号或查询密钥不正确');
+    if(!row || !(safeEqual(await sha(secret),row.lookup_hash)||(customer&&row.customer_id===customer.id&&row.order_type==='physical'&&row.demo===(env.DEMO_MODE==='true'?1:0))))fail(404,'订单号或查询密钥不正确');
     if(row.order_type!=='physical')return lookupHistoricalOrder(db,env,id,secret);
-    const {lookup_hash,checkout_hash,checkout_payload_hash,...order}=row;
+    const {lookup_hash,checkout_hash,checkout_payload_hash,admin_note,archived_at,revision,...order}=row;
     const unlocked=giftIsUnlocked(row),shipment=shipmentDisplay(row.tracking_number);
     const gift=unlocked?await first<any>(db,'SELECT ciphertext FROM telegram_gifts WHERE order_id=?',id):null;
     return {...order,shipping_status:shipment.shipped?'shipped':'pending',tracking_number:shipment.trackingNumber,telegram_gift_unlocked:unlocked,items:await all(db,'SELECT product_id,product_name,price,quantity FROM order_items WHERE order_id=?',id),tickets:await all(db,'SELECT * FROM tickets WHERE order_id=? ORDER BY created_at DESC',id),telegram_gift:gift?await decrypt(gift.ciphertext,env.INVENTORY_KEY!,GIFT_CONTEXT):null};
@@ -78,16 +80,17 @@ export async function settleOrder(db:D1Database,id:string,actor:string,reason:st
     const order=await first<any>(db,"SELECT * FROM orders WHERE id=? AND order_type='physical'",id);if(!order)fail(404,'实体订单不存在');
     if(amount!==undefined && amount!==order.total)fail(400,'付款金额必须包含商品金额及固定 20 元邮费');
     if(['paid','fulfilled'].includes(order.status)){if(order.payment_ref!==reference||order.payment_provider!==provider)fail(409,'订单已有其他付款记录');return {ok:true,idempotent:true};}
-    if(order.status!=='pending'||order.expires_at<=now())fail(409,'订单已关闭或过期');
+    if(order.status!=='pending'||order.expires_at<=now()||order.archived_at)fail(409,'订单已关闭或过期');
     try{await db.batch([
-        stmt(db,"UPDATE orders SET status='paid',paid_at=?,payment_provider=?,payment_ref=? WHERE id=? AND status='pending' AND expires_at>?",now(),provider,reference,id,now()),
+        stmt(db,"UPDATE orders SET status='paid',revision=revision+1,paid_at=?,payment_provider=?,payment_ref=? WHERE id=? AND status='pending' AND expires_at>?",now(),provider,reference,id,now()),
         stmt(db,`UPDATE physical_stock SET reserved=reserved-(SELECT r.quantity FROM physical_reservations r WHERE r.product_id=physical_stock.product_id AND r.order_id=? AND r.status='reserved'),sold=sold+(SELECT r.quantity FROM physical_reservations r WHERE r.product_id=physical_stock.product_id AND r.order_id=? AND r.status='reserved') WHERE product_id IN(SELECT product_id FROM physical_reservations WHERE order_id=? AND status='reserved') AND EXISTS(SELECT 1 FROM orders WHERE id=? AND status='paid' AND payment_ref=? AND payment_provider=?)`,id,id,id,id,reference,provider),
         stmt(db,"UPDATE physical_reservations SET status='committed' WHERE order_id=? AND status='reserved' AND EXISTS(SELECT 1 FROM orders WHERE id=? AND status='paid' AND payment_ref=? AND payment_provider=?)",id,id,reference,provider),
         ...guard(db,`EXISTS(SELECT 1 FROM orders o WHERE o.id=? AND o.status='paid' AND o.payment_ref=? AND o.payment_provider=? AND NOT EXISTS(SELECT 1 FROM order_items i WHERE i.order_id=o.id AND NOT EXISTS(SELECT 1 FROM physical_reservations r WHERE r.order_id=o.id AND r.product_id=i.product_id AND r.quantity=i.quantity AND r.status='committed')))`,id,reference,provider),audit(db,actor,'order.paid',id,reason)
     ]);}catch{fail(409,'付款记录或库存状态冲突，请刷新核对');}
     return {ok:true};
 }
-async function createOrder(db:D1Database,env:RuntimeEnv,b:any){
+async function createOrder(db:D1Database,env:RuntimeEnv,b:any,customer?:Customer|null){
+    if(b.accountCheckout===true&&!customer)fail(401,'账号登录已过期，请重新登录或继续免登录下单');
     if(!Array.isArray(b.items)||!b.items.length||b.items.length>12)fail(400,'请选择 1–12 种商品');
     if(b.acceptedTerms!==true)fail(400,'请同意购买协议');
     const contact=str(b.contact,100),address=str(b.shipping_address,500),recipient=str(b.recipient,60),method=str(b.payment_method,20)||'wechat';
@@ -95,7 +98,7 @@ async function createOrder(db:D1Database,env:RuntimeEnv,b:any){
     const secret=b.checkoutToken===undefined?randomToken():str(b.checkoutToken,128);if(!/^[a-f0-9]{64}$/.test(secret))fail(400,'下单凭证格式无效');
     const hash=await sha(secret),combined=new Map<string,number>();
     for(const item of b.items){if(!item||typeof item!=='object')fail(400,'商品格式无效');const id=str(item.id,64),q=integer(item.quantity,1,100);combined.set(id,(combined.get(id)||0)+q);}
-    const payloadHash=await sha(JSON.stringify({contact,address,recipient,method,items:[...combined].sort((a,b)=>a[0].localeCompare(b[0]))}));
+    const payloadHash=await sha(JSON.stringify({contact,address,recipient,method,...(customer?{customer:customer.id}:{}),items:[...combined].sort((a,b)=>a[0].localeCompare(b[0]))}));
     const replay=async()=>{const existing=await first<any>(db,'SELECT id,checkout_payload_hash FROM orders WHERE checkout_hash=?',hash);if(!existing)return null;if(existing.checkout_payload_hash!==payloadHash)fail(409,'同一下单凭证不能用于不同订单');return {...await lookup(db,env,existing.id,secret),secret,idempotent:true};};
     const prior=await replay();if(prior)return prior;
     const lines:{p:Product;q:number}[]=[];
@@ -103,7 +106,7 @@ async function createOrder(db:D1Database,env:RuntimeEnv,b:any){
     if(!await first(db,"SELECT id FROM telegram_gifts WHERE status='available' AND is_example=? LIMIT 1",env.DEMO_MODE==='true'?1:0))fail(409,'赠送 Telegram 账号暂时缺货，请稍后再下单');
     if(!env.INVENTORY_KEY)fail(503,'赠送账号加密配置尚未完成');
     const subtotal=lines.reduce((n,l)=>n+l.p.price*l.q,0),total=subtotal+SHIPPING_FEE,id='PX'+new Date().toISOString().slice(0,10).replaceAll('-','')+randomToken().slice(0,12).toUpperCase(),ts=now();
-    const st=[stmt(db,`INSERT INTO orders(id,lookup_hash,contact,total,status,ready,demo,created_at,expires_at,order_type,subtotal,shipping_fee,recipient,shipping_address,payment_method,checkout_hash,checkout_payload_hash) VALUES(?,?,?,?,'pending',0,?,?,?,'physical',?,?,?,?,?,?,?)`,id,hash,contact,total,env.DEMO_MODE==='true'?1:0,ts,ts+30*60000,subtotal,SHIPPING_FEE,recipient,address,method,hash,payloadHash)];
+    const st=[stmt(db,`INSERT INTO orders(id,lookup_hash,contact,total,status,ready,demo,created_at,expires_at,order_type,subtotal,shipping_fee,recipient,shipping_address,payment_method,checkout_hash,checkout_payload_hash,customer_id) VALUES(?,?,?,?,'pending',0,?,?,?,'physical',?,?,?,?,?,?,?,?)`,id,hash,contact,total,env.DEMO_MODE==='true'?1:0,ts,ts+30*60000,subtotal,SHIPPING_FEE,recipient,address,method,hash,payloadHash,customer?.id||null)];
     for(const {p,q} of lines){st.push(stmt(db,'INSERT INTO order_items VALUES(?,?,?,?,?,?)',uid(),id,p.id,p.name,p.price,q),stmt(db,'UPDATE physical_stock SET available=available-?,reserved=reserved+? WHERE product_id=?',q,q,p.id),stmt(db,"INSERT INTO physical_reservations VALUES(?,?,?,?,'reserved')",uid(),id,p.id,q));}
     st.push(stmt(db,`UPDATE telegram_gifts SET status='assigned',order_id=?,assigned_at=? WHERE id=(SELECT id FROM telegram_gifts WHERE status='available' AND is_example=? ORDER BY created_at,id LIMIT 1)`,id,ts,env.DEMO_MODE==='true'?1:0),...reservationGuard(db,id),stmt(db,'UPDATE orders SET ready=1 WHERE id=?',id));
     try{await db.batch(st);}catch{const duplicate=await replay();if(duplicate)return duplicate;fail(409,'商品或赠送账号库存发生变化，请刷新后重试');}
@@ -117,6 +120,9 @@ export async function handleApi(request:Request,env:RuntimeEnv):Promise<Response
         if(path.startsWith('payments/webhook'))return json({error:'支付回调接口已预留，尚未接入'},503);
         if(method!=='GET'){if(request.headers.get('origin')!==url.origin)fail(403,'请求来源不正确');if(!request.headers.get('content-type')?.startsWith('application/json'))fail(415,'请使用 JSON 格式');}
         if(path==='health'&&method==='GET'){await first(db,'SELECT count(*) AS n FROM physical_stock');return json({ok:true,database:true,commerce:'physical'});}
+        if(path.startsWith('customer/')){await expire(db);return await handleCustomerApi(db,env,request,path,url);}
+        const customer=await customerSession(db,env,request);
+        if(customer&&method==='POST'&&!path.startsWith('admin/')&&!path.startsWith('auth/'))customerCsrf(customer,request);
         if(path==='catalog'&&method==='GET')return json(await catalog(db,env));
         if (path === 'auth/status' && method === 'GET') {
             const count = await first<{
@@ -170,25 +176,25 @@ export async function handleApi(request:Request,env:RuntimeEnv):Promise<Response
             await stmt(db, 'DELETE FROM sessions WHERE staff_id=? AND csrf=?', p.id, p.csrf).run();
             return json({ ok: true }, 200, { 'Set-Cookie': 'px_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0' });
         }
-        if(path==='orders'&&method==='POST'){await limit(db,request,'order',10);await expire(db);return json(await createOrder(db,env,await body(request)),201);}
-        if(path==='orders/lookup'&&method==='POST'){await limit(db,request,'lookup',20);await expire(db);const b=await body(request);return json(await lookup(db,env,str(b.id,64),str(b.secret,128)));}
+        if(path==='orders'&&method==='POST'){await limit(db,request,'order',10);await expire(db);return json(await createOrder(db,env,await body(request),customer),201);}
+        if(path==='orders/lookup'&&method==='POST'){await limit(db,request,'lookup',20);await expire(db);const b=await body(request);return json(await lookup(db,env,str(b.id,64),str(b.secret,128),customer));}
         if(path==='orders/demo-pay'&&method==='POST'){
-            if(env.DEMO_MODE!=='true')fail(403,'正式商城不提供模拟付款');await limit(db,request,'demo-pay',10);await expire(db);const b=await body(request),id=str(b.id,64),secret=str(b.secret,128);const order=await lookup(db,env,id,secret);if(!order.demo)fail(403,'正式订单不能模拟付款');await settleOrder(db,id,'demo-buyer','仅演示，未收取款项','demo','demo-'+id);return json(await lookup(db,env,id,secret));
+            if(env.DEMO_MODE!=='true')fail(403,'正式商城不提供模拟付款');await limit(db,request,'demo-pay',10);await expire(db);const b=await body(request),id=str(b.id,64),secret=str(b.secret,128);const order=await lookup(db,env,id,secret,customer);if(!order.demo)fail(403,'正式订单不能模拟付款');await settleOrder(db,id,'demo-buyer','仅演示，未收取款项','demo','demo-'+id);return json(await lookup(db,env,id,secret,customer));
         }
         if(path==='orders/cancel'&&method==='POST'){
-            const b=await body(request),id=str(b.id,64);const o=await lookup(db,env,id,str(b.secret,128));if(o.order_type!=='physical')fail(409,'历史订单仅供查询');if(o.status==='cancelled')return json({ok:true});if(o.status!=='pending')fail(409,'当前订单无法取消');
-            try{await db.batch([stmt(db,"UPDATE orders SET status='cancelled' WHERE id=? AND status='pending'",id),...guard(db,"EXISTS(SELECT 1 FROM orders WHERE id=? AND status='cancelled')",id),...releaseStock(db)]);}catch{fail(409,'订单状态已变化，无法取消');}return json({ok:true});
+            const b=await body(request),id=str(b.id,64);const o=await lookup(db,env,id,str(b.secret,128),customer);if(o.order_type!=='physical')fail(409,'历史订单仅供查询');if(o.status==='cancelled')return json({ok:true});if(o.status!=='pending')fail(409,'当前订单无法取消');
+            try{await db.batch([stmt(db,"UPDATE orders SET status='cancelled',revision=revision+1 WHERE id=? AND status='pending'",id),...guard(db,"EXISTS(SELECT 1 FROM orders WHERE id=? AND status='cancelled')",id),...releaseStock(db),audit(db,customer?.id||'guest','order.cancel',id,'客户取消待付款订单')]);}catch{fail(409,'订单状态已变化，无法取消');}return json({ok:true});
         }
         if(path==='tickets'&&method==='POST'){
-            await limit(db,request,'ticket',10);const b=await body(request);await lookup(db,env,str(b.orderId,64),str(b.secret,128));const subject=str(b.subject,100),message=str(b.message,2000);if(!subject||message.length<5)fail(400,'请填写问题主题和详细说明');const id=uid();await stmt(db,"INSERT INTO tickets VALUES(?,?,?,?,'open','',?,?)",id,b.orderId,subject,message,now(),now()).run();return json({ok:true,id},201);
+            await limit(db,request,'ticket',10);const b=await body(request);await lookup(db,env,str(b.orderId,64),str(b.secret,128),customer);const subject=str(b.subject,100),message=str(b.message,2000);if(!subject||message.length<5)fail(400,'请填写问题主题和详细说明');const id=uid();await stmt(db,"INSERT INTO tickets VALUES(?,?,?,?,'open','',?,?)",id,b.orderId,subject,message,now(),now()).run();return json({ok:true,id},201);
         }
         if(path==='payments/methods'&&method==='GET')return json({methods:paymentMethods});
         if(path==='payments/create'&&method==='POST'){
-            await limit(db,request,'payment-create',10);const b=await body(request),order=await lookup(db,env,str(b.id,64),str(b.secret,128));const selected=str(b.method,20)||order.payment_method;if(!paymentMethods.some(p=>p.id===selected))fail(400,'支付方式无效');return json({...reservedPayment({orderId:order.id,amount:order.total,currency:'CNY',method:selected as PaymentMethod}),error:'支付接口已预留，尚未接通'},503);
+            await limit(db,request,'payment-create',10);const b=await body(request),order=await lookup(db,env,str(b.id,64),str(b.secret,128),customer);const selected=str(b.method,20)||order.payment_method;if(!paymentMethods.some(p=>p.id===selected))fail(400,'支付方式无效');return json({...reservedPayment({orderId:order.id,amount:order.total,currency:'CNY',method:selected as PaymentMethod}),error:'支付接口已预留，尚未接通'},503);
         }
         if(path==='payments/check')fail(503,'支付查询接口已预留，尚未接通');
         if(path.startsWith('admin/')){
-            const section=path.split('/')[1],roleMap:Record<string,string[]>={products:['owner','operator'],inventory:['owner','operator'],gifts:['owner'],shipment:['owner','operator'],categories:['owner','operator'],settings:['owner'],staff:['owner'],audits:['owner'],payment:['owner'],seed:['owner']};
+            const section=path.split('/')[1],roleMap:Record<string,string[]>={products:['owner','operator'],inventory:['owner','operator'],gifts:['owner'],customers:['owner'],shipment:['owner','operator'],categories:['owner','operator'],settings:['owner'],staff:['owner'],audits:['owner'],payment:['owner'],seed:['owner']};
             const p=await authenticated(db,request,roleMap[section]);await expire(db);
             if(section==='payment'&&method==='GET')return json({methods:paymentMethods,shippingFee:SHIPPING_FEE,demo:env.DEMO_MODE==='true'});
             if(section==='payment'&&method==='POST')fail(503,'三个支付接口均已预留，暂未接通');
@@ -219,29 +225,28 @@ export async function handleApi(request:Request,env:RuntimeEnv):Promise<Response
                 for(const code of new Set(codes)){const identity=code.split('|')[0].trim().toLowerCase();st.push(stmt(db,"INSERT OR IGNORE INTO telegram_gifts(id,ciphertext,fingerprint,status,is_example,created_at) VALUES(?,?,?,'available',?,?)",uid(),await encrypt(code,env.INVENTORY_KEY!,GIFT_CONTEXT),await sha('telegram-account:'+identity),env.DEMO_MODE==='true'?1:0,now()));}
                 const results=await db.batch([...st,audit(db,p.id,'gift.import','telegram',`提交 ${codes.length} 个`)]),imported=results.slice(0,-1).reduce((n,r)=>n+r.meta.changes,0);return json({ok:true,imported,skipped:codes.length-imported});
             }
-            if(section==='orders'&&method==='GET'){
-                const page=Math.max(1,Math.min(10000,Math.trunc(Number(url.searchParams.get('page')))||1)),q=str(url.searchParams.get('q'),100),status=str(url.searchParams.get('status'),20);const where=" WHERE order_type='physical' AND id LIKE ? AND (?='' OR status=?)";return json({orders:await all(db,'SELECT id,contact,recipient,shipping_address,total,subtotal,shipping_fee,status,shipping_status,tracking_number,created_at,expires_at,demo FROM orders'+where+' ORDER BY created_at DESC LIMIT 50 OFFSET ?',`%${q}%`,status,status,(page-1)*50),total:(await first<any>(db,'SELECT count(*) AS n FROM orders'+where,`%${q}%`,status,status)).n,page});
-            }
-            if(section==='order'&&method==='GET'){
-                const id=str(url.searchParams.get('id'),64),o=await first<any>(db,'SELECT id,contact,recipient,shipping_address,total,subtotal,shipping_fee,order_type,status,demo,shipping_status,tracking_number,shipped_at,payment_method,created_at,expires_at,paid_at,fulfilled_at,payment_provider,payment_ref FROM orders WHERE id=? AND ready=1',id);if(!o)fail(404,'订单不存在');return json({...o,items:await all(db,'SELECT product_id,product_name,price,quantity FROM order_items WHERE order_id=?',id),tickets:await all(db,'SELECT * FROM tickets WHERE order_id=? ORDER BY created_at DESC',id),giftAssigned:!!await first(db,'SELECT id FROM telegram_gifts WHERE order_id=?',id)});
+            if(section==='orders'&&method==='GET')return await listOrders(db,url);
+            if(section==='order'&&method==='GET')return await orderDetail(db,str(url.searchParams.get('id'),64));
+            if(['order-actions','shipment'].includes(section)&&method==='POST')return await manageOrders(db,request,p,section);
+            if(section==='customers'&&method==='GET')return json({email_ready:emailReady(env),customers:await all(db,`SELECT c.id,c.email,c.display_name,c.verified_at,c.is_demo,c.active,c.created_at,c.last_login_at,(SELECT count(*) FROM orders o WHERE o.customer_id=c.id) AS order_count FROM customers c ORDER BY c.created_at DESC LIMIT 200`)});
+            if(section==='customers'&&method==='POST'){
+                const b=await body(request),id=str(b.id,64),reason=str(b.reason,300);if(reason.length<5||typeof b.active!=='boolean')fail(400,'请填写处理原因');if(!await first(db,'SELECT id FROM customers WHERE id=?',id))fail(404,'客户账号不存在');
+                await db.batch([stmt(db,'UPDATE customers SET active=? WHERE id=?',b.active?1:0,id),stmt(db,'DELETE FROM customer_sessions WHERE customer_id=?',id),audit(db,p.id,'customer.status',id,`${b.active?'恢复':'停用'} / ${reason}`)]);return json({ok:true});
             }
             if(section==='orders'&&method==='POST'){
                 if(p.role!=='owner')fail(403,'仅店主可以确认收款或登记退款');const b=await body(request),id=str(b.id,64),reason=str(b.reason,300),reference=str(b.reference,100);if(reason.length<5||!reference)fail(400,'请填写处理依据和流水号');
-                if(b.action==='refund'){if(!await first(db,"SELECT id FROM orders WHERE id=? AND order_type='physical' AND status IN('paid','fulfilled')",id))fail(409,'仅已付款订单可登记退款');await db.batch([stmt(db,"UPDATE orders SET status='refunded' WHERE id=? AND status IN('paid','fulfilled')",id),audit(db,p.id,'order.refund',id,reason+' / '+reference)]);return json({ok:true});}
+                if(b.action==='refund'){try{await db.batch([...guard(db,"EXISTS(SELECT 1 FROM orders WHERE id=? AND order_type='physical' AND status IN('paid','fulfilled') AND archived_at IS NULL AND shipment_group_id IS NULL)",id),stmt(db,"UPDATE orders SET status='refunded',revision=revision+1 WHERE id=?",id),audit(db,p.id,'order.refund',id,reason+' / '+reference)]);}catch{fail(409,'仅未删除、未合并的已付款订单可登记退款；合并订单请先撤销发货并解除合并');}return json({ok:true});}if(b.action&&b.action!=='confirm')fail(400,'不支持该付款操作');
                 return json(await settleOrder(db,id,p.id,reason,env.DEMO_MODE==='true'?'demo-manual':'manual',reference));
             }
             if(section==='address'&&method==='POST'){
                 const b=await body(request),id=str(b.id,64),recipient=str(b.recipient,60),contact=str(b.contact,100),address=str(b.shipping_address,500);
                 try{await db.batch([
-                    ...guard(db,"EXISTS(SELECT 1 FROM orders WHERE id=? AND order_type='physical' AND status IN('pending','paid') AND shipping_status='pending')",id),
-                    stmt(db,'UPDATE orders SET recipient=?,contact=?,shipping_address=? WHERE id=?',recipient,contact,address,id),
+                    ...(b.revision===undefined?[]:guard(db,'EXISTS(SELECT 1 FROM orders WHERE id=? AND revision=?)',id,b.revision)),
+                    ...guard(db,"EXISTS(SELECT 1 FROM orders WHERE id=? AND order_type='physical' AND status IN('pending','paid') AND shipping_status='pending' AND shipment_group_id IS NULL AND archived_at IS NULL)",id),
+                    stmt(db,'UPDATE orders SET recipient=?,contact=?,shipping_address=?,revision=revision+1 WHERE id=?',recipient,contact,address,id),
                     audit(db,p.id,'order.address',id,'补充或修正收货资料')
-                ]);}catch{fail(409,'仅待付款或已付款待发货的实体订单可以修改收货信息');}
+                ]);}catch{fail(409,'仅未合并、未删除的待付款或已付款待发货订单可以修改收货信息');}
                 return json({ok:true});
-            }
-            if(section==='shipment'&&method==='POST'){
-                const b=await body(request),id=str(b.id,64),tracking=str(b.tracking_number,100);if(!/^[A-Za-z0-9][A-Za-z0-9 _-]{3,99}$/.test(tracking))fail(400,'请填写有效物流单号（4–100 位）');const o=await first<any>(db,"SELECT * FROM orders WHERE id=? AND order_type='physical'",id);if(!o)fail(404,'订单不存在');if(o.shipping_status==='shipped'){if(o.tracking_number===tracking)return json({ok:true,idempotent:true});fail(409,'订单已发货，不能重复填写不同单号');}if(o.status!=='paid')fail(409,'请先确认收款，再进行发货');
-                try{await db.batch([stmt(db,"UPDATE orders SET status='fulfilled',shipping_status='shipped',tracking_number=?,shipped_at=?,fulfilled_at=? WHERE id=? AND status='paid' AND shipping_status='pending'",tracking,now(),now(),id),...guard(db,"EXISTS(SELECT 1 FROM orders WHERE id=? AND status='fulfilled' AND shipping_status='shipped' AND tracking_number=?)",id,tracking),audit(db,p.id,'order.ship',id,tracking)]);}catch{fail(409,'订单状态已变化，请刷新核对');}return json({ok:true});
             }
             if(section==='tickets'&&method==='GET')return json(await all(db,'SELECT * FROM tickets ORDER BY created_at DESC LIMIT 200'));
             if(section==='tickets'&&method==='POST'){const b=await body(request),id=str(b.id,64),reply=str(b.reply,2000);if(!reply)fail(400,'请输入回复内容');if(!await first(db,'SELECT id FROM tickets WHERE id=?',id))fail(404,'工单不存在');await db.batch([stmt(db,'UPDATE tickets SET reply=?,status=?,updated_at=? WHERE id=?',reply,b.closed?'closed':'open',now(),id),audit(db,p.id,'ticket.reply',id)]);return json({ok:true});}

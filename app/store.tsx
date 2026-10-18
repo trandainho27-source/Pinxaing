@@ -1,7 +1,8 @@
 'use client';
 import { useEffect, useMemo, useState, useRef } from 'react';
-import { ArrowRight, RotateCw, Search, ShoppingBag, ShieldCheck, Zap, Headphones, Send, Globe, Sparkles, Code2, FileText, Box, Apple, AtSign as Twitter, ChevronRight, X, Minus, Plus, ArrowUpRight, Check, Copy, SlidersHorizontal, PackageCheck, Clock3, AlertCircle, ExternalLink, Menu, House, TreePine, LayoutGrid } from 'lucide-react';
+import { ArrowRight, RotateCw, Search, ShoppingBag, ShieldCheck, Zap, Headphones, Send, Globe, Sparkles, Code2, FileText, Box, Apple, AtSign as Twitter, ChevronRight, X, Minus, Plus, ArrowUpRight, Check, Copy, SlidersHorizontal, PackageCheck, Clock3, AlertCircle, ExternalLink, Menu, House, TreePine, LayoutGrid, UserRound } from 'lucide-react';
 import { api, money, date, statuses } from '@/lib/commerce/client';
+import AccountCenter, {type CustomerState} from './account-center';
 import OrderSummary from './order-summary';
 import TelegramGift from './telegram-gift';
 import {GIFT_LABEL} from '@/lib/commerce/order-display';
@@ -22,6 +23,8 @@ export default function Store({ initialPage = 'shop', initialProduct }: {
         secret: string;
     }[]>([]), [ticketOpen, setTicketOpen] = useState(false), [ticketSubject, setTicketSubject] = useState(''), [ticketMessage, setTicketMessage] = useState(''), [policy, setPolicy] = useState<string | null>(null);
     const [recipient,setRecipient]=useState(''),[address,setAddress]=useState(''),[paymentMethod,setPaymentMethod]=useState('wechat');
+    const [account,setAccount]=useState<CustomerState|null>(null);
+    async function refreshAccount(){const next=await api<CustomerState>('customer/session');setAccount(next);if(account?.customer&&!next.customer){setOrder(null);setSecret('');setReceipt(null);}}
     const checkoutIdentity=useRef({payload:'',token:''});
     useDialogs([selected?'product':'',drawer?'cart':'',receipt?'receipt':'',ticketOpen?'ticket':'',policy||''].join('|'),()=>{
         if(policy) setPolicy(null); else if(ticketOpen) setTicketOpen(false); else if(receipt){setReceipt(null);navigate('orders');lookup(receipt.id,receipt.secret);} else if(drawer) setDrawer(false); else setSelected(null);
@@ -37,6 +40,7 @@ export default function Store({ initialPage = 'shop', initialProduct }: {
     }
     useEffect(() => {
         refresh();
+        refreshAccount().catch(()=>{});
         try {
             setCart(JSON.parse(localStorage.getItem('px-cart') || '{}'));
             setRecent(JSON.parse(localStorage.getItem('px-recent') || '[]'));
@@ -88,9 +92,9 @@ export default function Store({ initialPage = 'shop', initialProduct }: {
         setBusy(true);
         try {
             const payload = {contact, recipient, shipping_address:address, payment_method:paymentMethod, acceptedTerms:accepted,items:cartLines.map(l=>({id:l.p.id,quantity:l.q}))};
-            const serialized=JSON.stringify(payload);
+            const serialized=JSON.stringify({...payload,customer:account?.customer?.id});
             if(checkoutIdentity.current.payload!==serialized){const token=Array.from(crypto.getRandomValues(new Uint8Array(32)),n=>n.toString(16).padStart(2,'0')).join('');checkoutIdentity.current={payload:serialized,token};}
-            const r=await api('orders',{...payload,checkoutToken:checkoutIdentity.current.token});
+            const r=await api('orders',{...payload,accountCheckout:!!account?.customer,checkoutToken:checkoutIdentity.current.token},account?.customer?.csrf);
             checkoutIdentity.current={payload:'',token:''};
             setReceipt(r);
             const next = [{ id: r.id, secret: r.secret }, ...recent].slice(0, 20);
@@ -105,6 +109,7 @@ export default function Store({ initialPage = 'shop', initialProduct }: {
         }
         catch (e) {
             setNotice((e as Error).message);
+            if((e as Error).message.includes('登录已过期'))await refreshAccount().catch(()=>{});
         }
         finally {
             setBusy(false);
@@ -114,7 +119,7 @@ export default function Store({ initialPage = 'shop', initialProduct }: {
         setBusy(true);
         setError('');
         try {
-            setOrder(await api<Order>('orders/lookup', { id, secret: key }));
+            setOrder(await api<Order>('orders/lookup', { id, secret: key },account?.customer?.csrf));
             setOrderId(id);
             setSecret(key);
         }
@@ -147,10 +152,10 @@ export default function Store({ initialPage = 'shop', initialProduct }: {
     <header className="store-header"><div className="header-inner"><a className="brand" href="/" onClick={e => {
         e.preventDefault();
         navigate('shop');
-    }}><span className="brand-mark"><BrandMark size={25}/></span><span>{catalog?.settings.brand || '品享'}<small>PINXIANG</small></span></a><nav className={mobileMenu ? 'open' : ''}>{[['shop', '商品商城'], ['orders', '订单查询'], ['help', '帮助中心']].map(([key, label]) => <a key={key} className={page === key ? 'active' : ''} href={key === 'shop' ? '/' : '/' + key} onClick={e => {
+    }}><span className="brand-mark"><BrandMark size={25}/></span><span>{catalog?.settings.brand || '品享'}<small>PINXIANG</small></span></a><nav className={mobileMenu ? 'open' : ''}>{[['shop', '商品商城'], ['help', '帮助中心']].map(([key, label]) => <a key={key} className={page === key ? 'active' : ''} href={key === 'shop' ? '/' : '/' + key} onClick={e => {
         e.preventDefault();
         navigate(key);
-    }}>{label}</a>)}</nav><div className="header-actions"><button className="cart-button" onClick={() => setDrawer(true)}><ShoppingBag size={18}/><span>购物车</span>{cartCount > 0 && <b>{cartCount}</b>}</button><button className="icon-button menu-button" aria-label="打开菜单" onClick={() => setMobileMenu(!mobileMenu)}><Menu size={20}/></button></div></div></header>
+    }}>{label}</a>)}</nav><div className="header-actions"><a href="/orders" className={'header-order-link '+(page==='orders'?'active':'')} onClick={e=>{e.preventDefault();navigate('orders');}}><Search size={17}/><span>订单查询</span></a><a href="/account" className="header-login" onClick={e=>{e.preventDefault();navigate('account');}}><UserRound size={17}/><span>{account?.customer?'我的账号':'登录'}</span></a><button className="cart-button" onClick={() => setDrawer(true)}><ShoppingBag size={18}/><span>购物车</span>{cartCount > 0 && <b>{cartCount}</b>}</button><button className="icon-button menu-button" aria-label="打开菜单" onClick={() => setMobileMenu(!mobileMenu)}><Menu size={20}/></button></div></div></header>
     <main className="store-main">{page === 'shop' ? <>
         <section className="hero"><div className="hero-copy"><div className="eyebrow"><span /> PINXIANG · EVERYDAY ESSENTIALS</div><h1>日常好物，<br /><em>随选，随享。</em></h1><p>{catalog?.settings.tagline || '精选日常好物，让生活多一点喜欢。'}<br />每单邮费 ¥20，付款后领取赠送的加密通讯账号。</p><div className="hero-actions"><button className="primary" onClick={() => document.getElementById('catalog')?.scrollIntoView({ behavior: 'smooth' })}>发现精选商品 <ArrowRight size={17}/></button><button className="hero-guide" onClick={()=>navigate('help')}>第一次购买？ <ArrowUpRight size={16}/></button></div><div className="hero-proof"><span><Zap size={15}/> 自助下单</span><span><ShieldCheck size={15}/> 固定邮费 ¥20</span><span><Headphones size={15}/> 售后支持</span></div></div><div className="hero-art" aria-hidden="true"><div className="editorial-orbit"/><div className="feature-ticket ticket-back"><ShoppingBag size={26}/><small>MAKE EVERYDAY BETTER</small><strong>好物随行，<br/>让生活更轻盈。</strong><span>HOME & EVERYDAY</span></div><div className="feature-ticket ticket-front"><div className="ticket-label"><span>品享精选</span><ArrowUpRight size={21}/></div><div className="ticket-symbol"><Sparkles size={62} strokeWidth={1.25}/></div><strong>每一份日常<br/>都值得被喜欢。</strong><div className="ticket-rule"/><small>A LITTLE MORE JOY.</small></div><div className="floating-label"><span className="success-circle"><Check size={15}/></span><div>把喜欢带回日常<small>选购 · 下单 · 等待好物</small></div></div><span className="art-index">CURATED FOR YOUR EVERYDAY / 01</span></div></section>
         <div className="announcement"><span className="announcement-label"><AlertCircle size={16}/> 商城公告</span><p>{catalog?.settings.announcement || '下单前请仔细查看商品说明与使用条件。'}</p><a href="/help" onClick={e => {
@@ -173,10 +178,10 @@ export default function Store({ initialPage = 'shop', initialProduct }: {
             setQty(p.min_qty);
         }}>选购 <ArrowRight size={14}/></button></div></article>)}</div>}
         </div></section><section className="benefit-strip">{[[ShieldCheck, '订单访问保护', '凭订单号与密钥安全查询'], [Zap, '固定配送费用', '每笔订单固定邮费 20 元'], [Send, '付款后领取账号', '加密通讯账号 · 客服与售后'], [Headphones, '售后服务支持', '每个问题都有处理记录']].map(([Icon, title, desc]: any) => <div key={title}><Icon size={24}/><span><strong>{title}</strong><small>{desc}</small></span></div>)}</section>
-        </> : page === 'orders' ? <section className="subpage"><div className="eyebrow">MY ORDERS</div><h1>订单与售后，都在这里。</h1><p className="subpage-lead">输入订单号与查询密钥，查看发货状态和物流单号，付款后可查看赠送的加密通讯账号。</p><div className="order-layout"><div><form className="panel lookup-form" onSubmit={e => {
+        </> : page === 'account' ? <AccountCenter session={account} refresh={refreshAccount} shop={()=>navigate('shop')} openOrder={id=>{navigate('orders');lookup(id,'');}}/> : page === 'orders' ? <section className="subpage"><div className="eyebrow">MY ORDERS</div><h1>订单与售后，都在这里。</h1><p className="subpage-lead">输入订单号与查询密钥，查看发货状态和物流单号，付款后可查看赠送的加密通讯账号。</p><div className="order-layout"><div>{account?.customer&&<div className="panel account-order-shortcut"><UserRound size={20}/><div><strong>已登录，可直接查看本人订单</strong><button className="text-button" onClick={()=>navigate('account')}>前往我的订单 <ArrowRight size={14}/></button></div></div>}<form className="panel lookup-form" onSubmit={e => {
             e.preventDefault();
             lookup();
-        }}><h3><Search size={19}/> 查询订单</h3><label>订单号<input required value={orderId} onChange={e => setOrderId(e.target.value)} placeholder="例如 PX20261013…"/></label><label>查询密钥<input required type="password" value={secret} onChange={e => setSecret(e.target.value)} placeholder="下单时获得的查询密钥"/></label><button className="primary" disabled={busy}>{busy ? '正在查询…' : '查询我的订单'}<ArrowRight size={16}/></button>{error && <p className="error-text">{error}</p>}</form><div className="panel local-orders"><h3><Clock3 size={18}/> 本机最近订单</h3><p>仅记录在当前浏览器，请妥善保存查询密钥。</p>{recent.length ? recent.map(o => <button key={o.id} onClick={() => lookup(o.id, o.secret)}><span>{o.id}</span><ChevronRight size={16}/></button>) : <div className="small-empty">当前浏览器暂无订单</div>}</div></div><div>{order ? <OrderSummary order={order} secret={secret} catalog={catalog} busy={busy} update={setOrder} ticket={()=>setTicketOpen(true)} copy={copy} cancel={async()=>{setBusy(true);try{await api('orders/cancel',{id:orderId,secret});await lookup();await refresh();}catch(e){setNotice((e as Error).message);}finally{setBusy(false);}}}/> : <div className="panel empty order-placeholder"><PackageCheck size={52}/><h3>订单信息将在这里显示</h3><p>查询后可查看未发货或已发货状态、物流单号，付款后显示赠送账号。</p></div>}</div></div></section> : <HelpCenter settings={catalog?.settings || {}} navigate={navigate}/>}
+        }}><h3><Search size={19}/> 查询订单</h3><label>订单号<input required value={orderId} onChange={e => setOrderId(e.target.value)} placeholder="例如 PX20261013…"/></label><label>查询密钥<input required type="password" value={secret} onChange={e => setSecret(e.target.value)} placeholder="下单时获得的查询密钥"/></label><button className="primary" disabled={busy}>{busy ? '正在查询…' : '查询我的订单'}<ArrowRight size={16}/></button>{error && <p className="error-text">{error}</p>}</form><div className="panel local-orders"><h3><Clock3 size={18}/> 本机最近订单</h3><p>仅记录在当前浏览器，请妥善保存查询密钥。</p>{recent.length ? recent.map(o => <button key={o.id} onClick={() => lookup(o.id, o.secret)}><span>{o.id}</span><ChevronRight size={16}/></button>) : <div className="small-empty">当前浏览器暂无订单</div>}</div></div><div>{order ? <OrderSummary order={order} secret={secret} csrf={account?.customer?.csrf} catalog={catalog} busy={busy} update={setOrder} ticket={()=>setTicketOpen(true)} copy={copy} cancel={async()=>{setBusy(true);try{await api('orders/cancel',{id:orderId,secret},account?.customer?.csrf);await lookup();await refresh();}catch(e){setNotice((e as Error).message);}finally{setBusy(false);}}}/> : <div className="panel empty order-placeholder"><PackageCheck size={52}/><h3>订单信息将在这里显示</h3><p>查询后可查看未发货或已发货状态、物流单号，付款后显示赠送账号。</p></div>}</div></div></section> : <HelpCenter settings={catalog?.settings || {}} navigate={navigate}/>}
     </main><footer className="store-footer"><div><a className="brand" href="/"><span className="brand-mark"><BrandMark size={23}/></span><span>{catalog?.settings.brand || '品享'}<small>PINXIANG</small></span></a><p>{catalog?.settings.footer || '日常好物，自助选购'} · 把喜欢带回生活</p></div><div className="footer-links"><button onClick={() => setPolicy('terms')}>购买协议</button><button onClick={() => setPolicy('privacy')}>隐私政策</button><small>© {new Date().getFullYear()} PINXIANG</small></div></footer>
     {notice && <div className="toast" role="status"><Check size={17}/>{notice}</div>}
     {selected && <div className="modal-backdrop" onClick={() => setSelected(null)}><div className="modal product-modal" role="dialog" aria-modal="true" aria-label="商品详情" onClick={e => e.stopPropagation()}><button className="modal-close" aria-label="关闭" onClick={() => setSelected(null)}><X size={22}/></button><ProductIcon product={selected} large/><span className="tag violet">{selected.tag}</span><h2>{selected.name}</h2><p>{selected.subtitle}</p><div className="detail-price">{money(selected.price)} <span>/ 件</span></div><div className="detail-spec"><span>适用地区 <strong>{selected.region}</strong></span><span>可售库存 <strong>{selected.stock} 件</strong></span></div><h4>商品介绍</h4><p className="pre-wrap">{selected.description}</p><h4>购买须知</h4><p className="pre-wrap">{selected.instructions}</p><div className="quantity-row"><span>购买数量</span><div className="quantity"><button aria-label="减少数量" disabled={qty <= selected.min_qty} onClick={() => setQty(qty - 1)}><Minus size={14}/></button><span>{qty}</span><button aria-label="增加数量" disabled={qty >= Math.min(selected.max_qty, selected.stock)} onClick={() => setQty(qty + 1)}><Plus size={14}/></button></div></div><div className="button-row"><button className="secondary" disabled={!selected.stock} onClick={() => add(selected, qty)}>加入购物车</button><button className="primary" disabled={!selected.stock} onClick={() => {
@@ -196,7 +201,7 @@ export default function Store({ initialPage = 'shop', initialProduct }: {
         const next = { ...cart };
         delete next[p.id];
         updateCart(next);
-    }}><X size={15}/></button></div>)}</div><div className="cart-checkout"><label>收货人 <small>选填</small><input value={recipient} onChange={e=>setRecipient(e.target.value)} placeholder="可留空，稍后联系客服补充" maxLength={60}/></label><label>收货地址 <small>选填</small><textarea rows={2} value={address} onChange={e=>setAddress(e.target.value)} placeholder="省市区、街道与门牌号（可留空）" maxLength={500}/></label><label>联系方式 <small>选填</small><input value={contact} onChange={e => setContact(e.target.value)} placeholder="手机号或其他联系方式（可留空）" maxLength={100}/></label><label className="checkbox-label"><input type="checkbox" checked={accepted} onChange={e => setAccepted(e.target.checked)}/>我已阅读商品说明并同意<button onClick={() => setPolicy('terms')}>购买协议</button></label><div className="checkout-method-picker"><span>付款方式 <small>接口待接入</small></span><div>{[['wechat','微信支付'],['alipay','支付宝'],['usdt','USDT']].map(([id,label])=><label key={id}><input type="radio" name="payment-method" value={id} checked={paymentMethod===id} onChange={()=>setPaymentMethod(id)}/>{label}</label>)}</div></div><div className="cart-breakdown"><div><span>商品金额</span><strong>{money(subtotal)}</strong></div><div className="mandatory-shipping"><span><Check size={15}/> 邮费 <small>必选 · 不可取消</small></span><strong>{money(shippingFee)}</strong></div><div className="free-gift-line"><span><Send size={15}/><span>{GIFT_LABEL} × 1</span></span><strong>付款后领取</strong></div></div><div className="cart-total"><span>应付金额</span><strong>{money(total)}</strong></div>{!catalog?.giftAvailable&&<div className="info-box">赠送账号暂时缺货，请稍后再下单。</div>}{catalog?.demo && <div className="info-box">演示订单：不会扣款或配送，赠送账号为测试内容。</div>}<button className="primary" disabled={busy || !accepted || !catalog?.giftAvailable} onClick={checkout}>{busy ? '正在创建订单…' : '提交订单'} <ArrowRight size={17}/></button><small><ShieldCheck size={12}/> 订单凭证用于查询发货和领取赠送账号</small></div></> : <div className="empty"><ShoppingBag size={44}/><h3>购物车还是空的</h3><p>去发现值得入手的日常好物。</p><button className="primary" onClick={() => {
+    }}><X size={15}/></button></div>)}</div><div className="cart-checkout"><div className="checkout-account-note"><UserRound size={17}/><span>{account?.customer?'订单将保存到你的账号':'免登录下单，记得保存订单凭证'}</span>{account?.customer&&(account.customer.recipient||account.customer.contact||account.customer.shipping_address)&&<button className="text-button" onClick={()=>{setRecipient(account.customer!.recipient);setContact(account.customer!.contact);setAddress(account.customer!.shipping_address);}}>使用常用信息</button>}</div><label>收货人 <small>选填</small><input value={recipient} onChange={e=>setRecipient(e.target.value)} placeholder="可留空，稍后联系客服补充" maxLength={60}/></label><label>收货地址 <small>选填</small><textarea rows={2} value={address} onChange={e=>setAddress(e.target.value)} placeholder="省市区、街道与门牌号（可留空）" maxLength={500}/></label><label>联系方式 <small>选填</small><input value={contact} onChange={e => setContact(e.target.value)} placeholder="手机号或其他联系方式（可留空）" maxLength={100}/></label><label className="checkbox-label"><input type="checkbox" checked={accepted} onChange={e => setAccepted(e.target.checked)}/>我已阅读商品说明并同意<button onClick={() => setPolicy('terms')}>购买协议</button></label><div className="checkout-method-picker"><span>付款方式 <small>接口待接入</small></span><div>{[['wechat','微信支付'],['alipay','支付宝'],['usdt','USDT']].map(([id,label])=><label key={id}><input type="radio" name="payment-method" value={id} checked={paymentMethod===id} onChange={()=>setPaymentMethod(id)}/>{label}</label>)}</div></div><div className="cart-breakdown"><div><span>商品金额</span><strong>{money(subtotal)}</strong></div><div className="mandatory-shipping"><span><Check size={15}/> 邮费 <small>必选 · 不可取消</small></span><strong>{money(shippingFee)}</strong></div><div className="free-gift-line"><span><Send size={15}/><span>{GIFT_LABEL} × 1</span></span><strong>付款后领取</strong></div></div><div className="cart-total"><span>应付金额</span><strong>{money(total)}</strong></div>{!catalog?.giftAvailable&&<div className="info-box">赠送账号暂时缺货，请稍后再下单。</div>}{catalog?.demo && <div className="info-box">演示订单：不会扣款或配送，赠送账号为测试内容。</div>}<button className="primary" disabled={busy || !accepted || !catalog?.giftAvailable} onClick={checkout}>{busy ? '正在创建订单…' : '提交订单'} <ArrowRight size={17}/></button><small><ShieldCheck size={12}/> 订单凭证用于查询发货和领取赠送账号</small></div></> : <div className="empty"><ShoppingBag size={44}/><h3>购物车还是空的</h3><p>去发现值得入手的日常好物。</p><button className="primary" onClick={() => {
         setDrawer(false);
         navigate('shop');
     }}>去逛逛 <ArrowRight size={16}/></button></div>}</aside></div>}
@@ -209,7 +214,7 @@ export default function Store({ initialPage = 'shop', initialProduct }: {
         e.preventDefault();
         setBusy(true);
         try {
-            await api('tickets', { orderId, secret, subject: ticketSubject, message: ticketMessage });
+            await api('tickets', { orderId, secret, subject: ticketSubject, message: ticketMessage },account?.customer?.csrf);
             setTicketOpen(false);
             setTicketSubject('');
             setTicketMessage('');

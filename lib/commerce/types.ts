@@ -3,6 +3,8 @@ export interface RuntimeEnv {
     INVENTORY_KEY?: string;
     BOOTSTRAP_TOKEN?: string;
     DEMO_MODE?: string;
+    RESEND_API_KEY?: string;
+    EMAIL_FROM?: string;
     PAYMENT_WEBHOOK_SECRET?: string;
     PAYMENT_PROVIDER?: string;
     TRON_RECEIVING_ADDRESS?: string;
@@ -49,6 +51,8 @@ export interface Staff {
     csrf?: string;
 }
 export interface Order {
+    customer_id?: string | null;
+    shipment_group_id?: string | null;
     order_type?: string;
     subtotal?: number;
     shipping_fee?: number;
@@ -77,6 +81,17 @@ export interface Order {
     }[];
     delivery?: string[];
     tickets?: Ticket[];
+}
+export interface Customer {
+    id: string;
+    email: string;
+    display_name: string;
+    recipient: string;
+    contact: string;
+    shipping_address: string;
+    verified_at: number | null;
+    is_demo: number;
+    csrf: string;
 }
 export interface PaymentInvoice {
     id: string;
