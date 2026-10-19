@@ -2,6 +2,27 @@
 
 现在的 Sites 地址是店主私人体验站，不是公开营业站。正式站建议部署到你自己的 Cloudflare 账户并绑定域名。仓库提供 Cloudflare Worker 部署方式，不能当普通静态文件直接拖入 Pages。
 
+## 从 GitHub 创建 Cloudflare Worker
+
+项目中文名称为「品香」，仓库选择 `trandainho27-source/Pinxaing`。创建应用时填写：
+
+| 设置 | 值 |
+| --- | --- |
+| 项目名称 | `pinxiang-commerce`，与仓库中的 Worker 配置一致 |
+| 构建命令 | `npm run install:ci && npm run build` |
+| 部署命令 | `npm run deploy`，负责创建或复用 D1、应用数据库迁移并发布 |
+| 根目录 | `/` |
+| 预览构建 | 首次部署先关闭，配置独立预览数据库后再启用 |
+| Cloudflare Access 保护 | 公开商城保持关闭；后台使用独立员工登录 |
+
+构建变量添加 `NODE_VERSION=24` 与 `SKIP_DEPENDENCY_INSTALL=1`，均为普通文本。使用项目安装脚本安装锁定的依赖版本。
+
+选择为本项目创建新的构建 API 令牌，确认当前账户下包含 Workers Scripts 编辑与 D1 Storage 编辑权限。令牌的备注名称可使用 `Pinxaing`，不会决定网站显示名称。
+
+构建变量只在打包时可用。发布后，进入 Worker → Settings → Variables and Secrets 配置下文的运行时机密，以及 `RESEND_API_KEY` 与 `EMAIL_FROM=品香 <login@auth.pinxiang.lol>`。在此处保存变更并部署后，才会应用到运行中的网站。
+
+如已经运行过旧版，在后台「站点设置」中将品牌名称更正为「品香」；既有数据库、订单和加密密钥继续沿用。
+
 ## Windows 快速部署
 
 1. 安装 Node.js 24（包含 npm）。

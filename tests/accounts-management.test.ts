@@ -24,7 +24,7 @@ test('demo verification is single use, hashed at rest, and explicitly not a veri
  assert.equal(row(s,'SELECT count(*) AS n FROM customer_sessions').n,1);
 });
 test('real email adapter verifies the received code, normalizes emails, and never returns codes or provider secrets',async()=>{
- const db=new DB(),env:any={DB:db,DEMO_MODE:'false',INVENTORY_KEY:'c'.repeat(64),RESEND_API_KEY:'fake-mail-test-token',EMAIL_FROM:'品享 <login@example.com>'},c=client(env),original=globalThis.fetch;let sent:any=null,calls=0;
+ const db=new DB(),env:any={DB:db,DEMO_MODE:'false',INVENTORY_KEY:'c'.repeat(64),RESEND_API_KEY:'fake-mail-test-token',EMAIL_FROM:'品香 <login@example.com>'},c=client(env),original=globalThis.fetch;let sent:any=null,calls=0;
  globalThis.fetch=async(input,init)=>{calls++;assert.equal(input,'https://api.resend.com/emails');assert.equal((init!.headers as any).Authorization,'Bearer fake-mail-test-token');assert.match((init!.headers as any)['Idempotency-Key'],/^pinxiang-login\//);sent=JSON.parse(String(init!.body));return Response.json({id:'mock-message'});};
  try{
   const sentResult=await c('customer/email/code',{email:' Buyer@Example.com '});assert.equal(sentResult.r.status,200);const ch=sentResult.d;assert.deepEqual(sent.to,['buyer@example.com']);assert.equal(ch.demo_code,undefined);assert.equal(ch.code,undefined);assert.ok(!JSON.stringify(ch).includes('fake-mail-test-token'));

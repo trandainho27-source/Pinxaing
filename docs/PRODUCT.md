@@ -1,5 +1,7 @@
 # 实体商城产品决策
 
+项目中文名称为「品香」，用于前台、后台、邮件和导出文件。GitHub 专用仓库为 `trandainho27-source/Pinxaing`，网站域名为 `pinxiang.lol`，发信子域名为 `auth.pinxiang.lol`。Cloudflare 项目名沿用 `pinxiang-commerce`。
+
 用户明确要求实体物品自助下单、地址与联系方式可空、每单强制 20 元邮费、付款后显示赠送的加密通讯账号、仅展示发货状态和单号，以及统一预留微信、支付宝、USDT 接口。该要求取代原先“数字商品”的暂定方向。
 
 ## 客户购买流程

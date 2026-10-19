@@ -49,9 +49,10 @@ async function seed(db:D1Database,env:RuntimeEnv,actor:string) {
         const content=`DEMO-TELEGRAM-${String(n).padStart(3,'0')} | 仅用于界面演示，不能登录 Telegram`;
         st.push(stmt(db,`INSERT OR IGNORE INTO telegram_gifts(id,ciphertext,fingerprint,status,is_example,created_at) VALUES(?,?,?,'available',1,?)`,uid(),await encrypt(content,env.INVENTORY_KEY!,GIFT_CONTEXT),await sha('demo-gift-'+n),ts));
     }
-    const defaults={brand:'品享',tagline:'精选日常好物，让生活多一点喜欢。',announcement:'实体商品自助下单，每单固定邮费 ¥20；地址和联系方式可留空，付款成功后显示赠送的加密通讯账号。',support:'付款后可使用订单中的赠送账号联系客服；付款前后均可提交订单工单。',telegramSupport:'',businessHours:'工作日 09:00–18:00',footer:'日常好物，自助选购',terms:'本商城售卖实体商品。每笔订单固定收取 20 元邮费，不可取消。地址和联系方式可留空，发货前请通过客服补充。每单赠送一个加密通讯账号用于联系客服和售后，付款成功后才显示账号内容。已展示的赠送账号不会因取消订单而回收。退款与退换货请联系商家。',privacy:'收货地址和联系方式均可选填，仅用于订单配送与售后。订单密钥用于访问订单和赠送账号，请妥善保存。'};
-    const oldDefaults:Record<string,string>={tagline:'好工具，好灵感，好好享受数字生活。',announcement:'欢迎体验品享。这是独立演示商城，示例商品用于体验购买与交付，不收取真实款项。',footer:'数字商品交付平台',terms:'购买前请确认商品说明、适用地区及使用条件。数字商品交付后，如有质量问题请凭订单号提交售后工单。',support:'请通过订单页面提交售后工单',privacy:'仅收集履行订单必需的联系信息。查询密钥用于验证订单访问权限。联系信息仅供客服处理订单使用。'};
-    for(const [key,value] of Object.entries(defaults))st.push(stmt(db,`INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE settings.value=?`,key,value,oldDefaults[key]??value));
+    const defaults={brand:'品香',tagline:'精选日常好物，让生活多一点喜欢。',announcement:'实体商品自助下单，每单固定邮费 ¥20；地址和联系方式可留空，付款成功后显示赠送的加密通讯账号。',support:'付款后可使用订单中的赠送账号联系客服；付款前后均可提交订单工单。',telegramSupport:'',businessHours:'工作日 09:00–18:00',footer:'日常好物，自助选购',terms:'本商城售卖实体商品。每笔订单固定收取 20 元邮费，不可取消。地址和联系方式可留空，发货前请通过客服补充。每单赠送一个加密通讯账号用于联系客服和售后，付款成功后才显示账号内容。已展示的赠送账号不会因取消订单而回收。退款与退换货请联系商家。',privacy:'收货地址和联系方式均可选填，仅用于订单配送与售后。订单密钥用于访问订单和赠送账号，请妥善保存。'};
+    // These old spellings are comparison-only values for existing default settings.
+    const oldDefaults:Record<string,string>={brand:'品享',tagline:'好工具，好灵感，好好享受数字生活。',announcement:'欢迎体验品享。这是独立演示商城，示例商品用于体验购买与交付，不收取真实款项。',footer:'数字商品交付平台',terms:'购买前请确认商品说明、适用地区及使用条件。数字商品交付后，如有质量问题请凭订单号提交售后工单。',support:'请通过订单页面提交售后工单',privacy:'仅收集履行订单必需的联系信息。查询密钥用于验证订单访问权限。联系信息仅供客服处理订单使用。'};
+    for(const [key,value] of Object.entries(defaults))st.push(stmt(db,`INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE settings.value IN (?,?)`,key,value,oldDefaults[key]??value,(oldDefaults[key]??value).replaceAll('品享','品香')));
     st.push(stmt(db,"INSERT OR IGNORE INTO settings VALUES('physical_demo_seeded','1')"),audit(db,actor,'physical.demo.seed','catalog'));
     await db.batch(st);await refreshDemoGiftCopy(db);return {ok:true};
 }

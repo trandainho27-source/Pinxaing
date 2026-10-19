@@ -1,4 +1,4 @@
-# 品享 Pinxiang · 实体商品自助商城
+# 品香 Pinxiang · 实体商品自助商城
 
 实体商品售卖网站与配套管理后台，项目专用仓库：**trandainho27-source/Pinxaing**。当前地址为私人演示站，示例商品不产生真实配送，赠送账号是不能登录 Telegram 的测试内容。
 

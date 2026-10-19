@@ -73,7 +73,7 @@
     }
   },
   "packageManager": "pnpm@11.25.0",
-  "description": "Pinxiang 品享实体商品自助商城与商家管理系统",
+  "description": "Pinxiang 品香实体商品自助商城与商家管理系统",
   "cloudflare": {
     "bindings": {
       "DB": {

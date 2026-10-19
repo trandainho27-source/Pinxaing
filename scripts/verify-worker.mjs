@@ -16,7 +16,7 @@ function client(mf){const cookies=new Map();let staffCsrf='',customerCsrf='';ret
 const mf=new Miniflare({...options,d1Databases:{DB:'physical-demo-db'},bindings:{DEMO_MODE:'true',INVENTORY_KEY:'b'.repeat(64)}});
 try{
  const db=await migrate(mf),request=client(mf);assert.equal((await db.prepare('SELECT count(*) AS n FROM products').first()).n,0);
- for(const path of ['/','/orders','/account','/help','/admin']){const response=await mf.dispatchFetch('https://store.test'+path);assert.equal(response.status,200,path);const html=await response.text();assert.match(html,/品享|PINXIANG/);if(path==='/'){assert.match(html,/header-login/);assert.match(html,/href="\/account"/);assert.match(html,/header-order-link/);}}
+ for(const path of ['/','/orders','/account','/help','/admin']){const response=await mf.dispatchFetch('https://store.test'+path);assert.equal(response.status,200,path);const html=await response.text();assert.match(html,/品香|PINXIANG/);if(path==='/'){assert.match(html,/header-login/);assert.match(html,/href="\/account"/);assert.match(html,/header-order-link/);}}
  await request('admin/order?id=missing',undefined,401);const catalog=await request('catalog');assert.equal(catalog.products.length,8);assert.equal(catalog.shippingFee,2000);assert.equal(catalog.paymentEnabled,false);
  const p=catalog.products[0],payload={acceptedTerms:true,items:[{id:p.id,quantity:2}],checkoutToken:'d'.repeat(64),shipping_fee:0,total:1};
  const order=await request('orders',payload,201);assert.equal(order.total,p.price*2+2000);assert.equal(order.shipping_address,'');assert.equal(order.contact,'');assert.equal(order.telegram_gift,null);assert.equal(order.telegram_gift_unlocked,false);

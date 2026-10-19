@@ -188,7 +188,7 @@ async function seed(db: D1Database, env: RuntimeEnv, actor: string) {
             statements.push(stmt(db, 'INSERT OR IGNORE INTO inventory(id,product_id,ciphertext,fingerprint,status,order_id,created_at) VALUES(?,?,?,?,\'available\',NULL,?)', uid(), id, await encrypt(code, env.INVENTORY_KEY!, id as string), await sha(`${id}:${code}`), ts));
         }
     }
-    for (const [key, value] of Object.entries({ brand: '品享', tagline: '好工具，好灵感，好好享受数字生活。', announcement: '欢迎体验品享。这是独立演示商城，示例商品用于体验购买与交付，不收取真实款项。', support: '请通过订单页面提交售后工单', businessHours: '工作日 09:00–18:00', footer: '数字商品交付平台', terms: '购买前请确认商品说明、适用地区及使用条件。数字商品交付后，如有质量问题请凭订单号提交售后工单。', privacy: '仅收集履行订单必需的联系信息。查询密钥用于验证订单访问权限。联系信息仅供客服处理订单使用。' }))
+    for (const [key, value] of Object.entries({ brand: '品香', tagline: '好工具，好灵感，好好享受数字生活。', announcement: '欢迎体验品香。这是独立演示商城，示例商品用于体验购买与交付，不收取真实款项。', support: '请通过订单页面提交售后工单', businessHours: '工作日 09:00–18:00', footer: '数字商品交付平台', terms: '购买前请确认商品说明、适用地区及使用条件。数字商品交付后，如有质量问题请凭订单号提交售后工单。', privacy: '仅收集履行订单必需的联系信息。查询密钥用于验证订单访问权限。联系信息仅供客服处理订单使用。' }))
         statements.push(stmt(db, 'INSERT OR IGNORE INTO settings VALUES(?,?)', key, value));
     statements.push(audit(db, actor, 'demo.seed', 'catalog'));
     await db.batch(statements);

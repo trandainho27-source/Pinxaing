@@ -1,6 +1,7 @@
-# Pinxiang project instructions
+# 品香 Pinxiang project instructions
 
 - This repository is `trandainho27-source/Pinxaing`, dedicated to the independent Pinxiang storefront and merchant console.
+- The Chinese brand name is 品香. Use it consistently in customer pages, administration, exports, and emails. Keep the existing repository, domain, Worker/database identifiers and cryptographic contexts when correcting display text.
 - Read README.md and docs/PRODUCT.md before changing scope. Product direction is single-store physical commerce; the user has explicitly superseded the original digital-goods assumption.
 - Keep customer storefront free of administration links. Administration lives under `/admin` and all mutations require server-side authorization.
 - Never commit environment secrets, inventory content, customer records or database exports. `.dev.vars.example` contains names only.

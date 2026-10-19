@@ -43,7 +43,7 @@ async function challenge(db:D1Database,env:RuntimeEnv,request:Request,b:any,demo
     if(!result.meta.changes)fail(429,'请等待 60 秒后再发送验证码');
     if(!demo){
         try{
-            const response=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${env.RESEND_API_KEY}`,'Content-Type':'application/json','Idempotency-Key':`pinxiang-login/${id}`},body:JSON.stringify({from:env.EMAIL_FROM,to:[email],subject:'品享 · 邮箱登录验证码',text:`您的品享登录验证码是：${code}\n验证码 10 分钟内有效，仅可使用一次。验证通过后将登录或创建账号。\n请勿向任何人透露验证码。若非本人操作，请忽略此邮件。`}),signal:AbortSignal.timeout(10000)});
+            const response=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${env.RESEND_API_KEY}`,'Content-Type':'application/json','Idempotency-Key':`pinxiang-login/${id}`},body:JSON.stringify({from:env.EMAIL_FROM,to:[email],subject:'品香 · 邮箱登录验证码',text:`您的品香登录验证码是：${code}\n验证码 10 分钟内有效，仅可使用一次。验证通过后将登录或创建账号。\n请勿向任何人透露验证码。若非本人操作，请忽略此邮件。`}),signal:AbortSignal.timeout(10000)});
             if(!response.ok)throw new Error('MAIL_UNAVAILABLE');
         }catch{await stmt(db,'UPDATE email_challenges SET expires_at=? WHERE id=?',now(),id).run();fail(503,'验证码暂时发送失败，请稍后重试，也可以免登录购买');}
     }
