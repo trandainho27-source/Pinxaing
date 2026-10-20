@@ -1,13 +1,14 @@
 import type {Customer, RuntimeEnv} from './types.ts';
 import {uid, randomToken, sha, hmac, safeEqual} from './security.ts';
 import {all, first, stmt, now, fail, json, body, str, limit, audit} from './api-common.ts';
+import {emailConfiguration} from './email-configuration.ts';
 const TTL = 10 * 60000, SESSION_TTL = 7 * 86400000;
 const cookie = (token:string, age=604800) => `px_customer=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${age}`;
 export function transactionGuard(db:D1Database, condition:string, ...values:any[]) {
     const id=uid();
     return [stmt(db,`INSERT INTO transaction_guards(id,passed) SELECT ?,CASE WHEN ${condition} THEN 1 ELSE 0 END`,id,...values),stmt(db,'DELETE FROM transaction_guards WHERE id=?',id)];
 }
-export function emailReady(env:RuntimeEnv) {return !!env.RESEND_API_KEY && !!env.EMAIL_FROM && /^[a-f0-9]{64}$/i.test(env.INVENTORY_KEY||'');}
+export function emailReady(env:RuntimeEnv) {return emailConfiguration(env).ready;}
 export async function customerSession(db:D1Database, env:RuntimeEnv, request:Request, required=false) {
     const token=request.headers.get('cookie')?.split(';').map(x=>x.trim()).find(x=>x.startsWith('px_customer='))?.slice(12);
     const customer=token?await first<Customer>(db,`SELECT c.id,c.email,c.display_name,c.recipient,c.contact,c.shipping_address,c.verified_at,c.is_demo,s.csrf FROM customer_sessions s JOIN customers c ON c.id=s.customer_id WHERE s.hash=? AND s.expires_at>? AND c.active=1 AND (c.is_demo=0 OR ?=1)`,await sha(token),now(),env.DEMO_MODE==='true'?1:0):null;
@@ -33,7 +34,7 @@ function codeValue() {
 }
 async function challenge(db:D1Database,env:RuntimeEnv,request:Request,b:any,demo:boolean) {
     if(demo&&env.DEMO_MODE!=='true')fail(403,'正式环境不提供演示邮箱');
-    if(!demo&&!emailReady(env))fail(503,'邮箱验证码服务尚未配置，您仍可免登录选购及查询订单');
+    if(!demo&&!emailReady(env))fail(503,'邮箱登录暂时不可用，请稍后重试。您仍可免登录选购及查询订单。');
     if(!env.INVENTORY_KEY)fail(503,'账号验证服务尚未配置');
     await limit(db,request,'customer-email-send',5);
     const email=demo?`demo-${randomToken().slice(0,12)}@example.invalid`:normalizeEmail(b.email);

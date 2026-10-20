@@ -6,6 +6,7 @@ import {paymentMethods,reservedPayment,type PaymentMethod} from './payment-provi
 import {lookup as lookupHistoricalOrder} from './legacy-api.ts';
 import {giftIsUnlocked,shipmentDisplay} from './order-display.ts';
 import {handleCustomerApi,customerSession,customerCsrf,emailReady} from './customer-api.ts';
+import {emailConfiguration} from './email-configuration.ts';
 import {listOrders,orderDetail,manageOrders} from './order-management.ts';
 export const SHIPPING_FEE = 2000;
 const GIFT_CONTEXT = 'pinxiang-telegram-gift';
@@ -229,7 +230,7 @@ export async function handleApi(request:Request,env:RuntimeEnv):Promise<Response
             if(section==='orders'&&method==='GET')return await listOrders(db,url);
             if(section==='order'&&method==='GET')return await orderDetail(db,str(url.searchParams.get('id'),64));
             if(['order-actions','shipment'].includes(section)&&method==='POST')return await manageOrders(db,request,p,section);
-            if(section==='customers'&&method==='GET')return json({email_ready:emailReady(env),customers:await all(db,`SELECT c.id,c.email,c.display_name,c.verified_at,c.is_demo,c.active,c.created_at,c.last_login_at,(SELECT count(*) FROM orders o WHERE o.customer_id=c.id) AS order_count FROM customers c ORDER BY c.created_at DESC LIMIT 200`)});
+            if(section==='customers'&&method==='GET')return json({email_ready:emailReady(env),email_configuration:emailConfiguration(env),checked_at:now(),demo:env.DEMO_MODE==='true',customers:await all(db,`SELECT c.id,c.email,c.display_name,c.verified_at,c.is_demo,c.active,c.created_at,c.last_login_at,(SELECT count(*) FROM orders o WHERE o.customer_id=c.id) AS order_count FROM customers c ORDER BY c.created_at DESC LIMIT 200`)});
             if(section==='customers'&&method==='POST'){
                 const b=await body(request),id=str(b.id,64),reason=str(b.reason,300);if(reason.length<5||typeof b.active!=='boolean')fail(400,'请填写处理原因');if(!await first(db,'SELECT id FROM customers WHERE id=?',id))fail(404,'客户账号不存在');
                 await db.batch([stmt(db,'UPDATE customers SET active=? WHERE id=?',b.active?1:0,id),stmt(db,'DELETE FROM customer_sessions WHERE customer_id=?',id),audit(db,p.id,'customer.status',id,`${b.active?'恢复':'停用'} / ${reason}`)]);return json({ok:true});

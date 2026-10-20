@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useMemo, useState, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { ArrowRight, RotateCw, Search, ShoppingBag, ShieldCheck, Zap, Headphones, Send, Globe, Sparkles, Code2, FileText, Box, Apple, AtSign as Twitter, ChevronRight, X, Minus, Plus, ArrowUpRight, Check, Copy, SlidersHorizontal, PackageCheck, Clock3, AlertCircle, ExternalLink, Menu, House, TreePine, LayoutGrid, UserRound } from 'lucide-react';
 import { api, money, date, statuses } from '@/lib/commerce/client';
 import AccountCenter, {type CustomerState} from './account-center';
@@ -23,8 +23,20 @@ export default function Store({ initialPage = 'shop', initialProduct }: {
         secret: string;
     }[]>([]), [ticketOpen, setTicketOpen] = useState(false), [ticketSubject, setTicketSubject] = useState(''), [ticketMessage, setTicketMessage] = useState(''), [policy, setPolicy] = useState<string | null>(null);
     const [recipient,setRecipient]=useState(''),[address,setAddress]=useState(''),[paymentMethod,setPaymentMethod]=useState('wechat');
-    const [account,setAccount]=useState<CustomerState|null>(null);
-    async function refreshAccount(){const next=await api<CustomerState>('customer/session');setAccount(next);if(account?.customer&&!next.customer){setOrder(null);setSecret('');setReceipt(null);}}
+    const [account,setAccount]=useState<CustomerState|null>(null),[accountError,setAccountError]=useState('');
+    const accountRef=useRef<CustomerState|null>(null),accountRequest=useRef(0);
+    const refreshAccount=useCallback(async()=>{
+        const request=++accountRequest.current;
+        try{
+            const next=await api<CustomerState>('customer/session');
+            if(request!==accountRequest.current)return;
+            const previous=accountRef.current;accountRef.current=next;setAccount(next);setAccountError('');
+            if(previous?.customer&&!next.customer){setOrder(null);setSecret('');setReceipt(null);}
+        }catch(e){
+            if(request===accountRequest.current)setAccountError('账号服务连接失败，请重新加载。');
+            throw e;
+        }
+    },[]);
     const checkoutIdentity=useRef({payload:'',token:''});
     useDialogs([selected?'product':'',drawer?'cart':'',receipt?'receipt':'',ticketOpen?'ticket':'',policy||''].join('|'),()=>{
         if(policy) setPolicy(null); else if(ticketOpen) setTicketOpen(false); else if(receipt){setReceipt(null);navigate('orders');lookup(receipt.id,receipt.secret);} else if(drawer) setDrawer(false); else setSelected(null);
@@ -40,7 +52,6 @@ export default function Store({ initialPage = 'shop', initialProduct }: {
     }
     useEffect(() => {
         refresh();
-        refreshAccount().catch(()=>{});
         try {
             setCart(JSON.parse(localStorage.getItem('px-cart') || '{}'));
             setRecent(JSON.parse(localStorage.getItem('px-recent') || '[]'));
@@ -48,6 +59,16 @@ export default function Store({ initialPage = 'shop', initialProduct }: {
         catch {
         }
     }, []);
+    useEffect(()=>{
+        refreshAccount().catch(()=>{});
+        if(page!=='account')return;
+        // Refresh an anonymous login screen after runtime settings change, without
+        // overwriting a signed-in customer's unsaved profile edits.
+        const recheck=()=>{if(!accountRef.current?.customer&&document.visibilityState==='visible')refreshAccount().catch(()=>{});};
+        window.addEventListener('focus',recheck);
+        const timer=window.setInterval(recheck,30000);
+        return()=>{window.removeEventListener('focus',recheck);window.clearInterval(timer);};
+    },[page,refreshAccount]);
     useEffect(() => {
         if (initialProduct && catalog) {
             const p = catalog.products.find(x => x.id === initialProduct);
@@ -178,7 +199,7 @@ export default function Store({ initialPage = 'shop', initialProduct }: {
             setQty(p.min_qty);
         }}>选购 <ArrowRight size={14}/></button></div></article>)}</div>}
         </div></section><section className="benefit-strip">{[[ShieldCheck, '订单访问保护', '凭订单号与密钥安全查询'], [Zap, '固定配送费用', '每笔订单固定邮费 20 元'], [Send, '付款后领取账号', '加密通讯账号 · 客服与售后'], [Headphones, '售后服务支持', '每个问题都有处理记录']].map(([Icon, title, desc]: any) => <div key={title}><Icon size={24}/><span><strong>{title}</strong><small>{desc}</small></span></div>)}</section>
-        </> : page === 'account' ? <AccountCenter session={account} refresh={refreshAccount} shop={()=>navigate('shop')} openOrder={id=>{navigate('orders');lookup(id,'');}}/> : page === 'orders' ? <section className="subpage"><div className="eyebrow">MY ORDERS</div><h1>订单与售后，都在这里。</h1><p className="subpage-lead">输入订单号与查询密钥，查看发货状态和物流单号，付款后可查看赠送的加密通讯账号。</p><div className="order-layout"><div>{account?.customer&&<div className="panel account-order-shortcut"><UserRound size={20}/><div><strong>已登录，可直接查看本人订单</strong><button className="text-button" onClick={()=>navigate('account')}>前往我的订单 <ArrowRight size={14}/></button></div></div>}<form className="panel lookup-form" onSubmit={e => {
+        </> : page === 'account' ? <AccountCenter session={account} sessionError={accountError} refresh={refreshAccount} shop={()=>navigate('shop')} openOrder={id=>{navigate('orders');lookup(id,'');}}/> : page === 'orders' ? <section className="subpage"><div className="eyebrow">MY ORDERS</div><h1>订单与售后，都在这里。</h1><p className="subpage-lead">输入订单号与查询密钥，查看发货状态和物流单号，付款后可查看赠送的加密通讯账号。</p><div className="order-layout"><div>{account?.customer&&<div className="panel account-order-shortcut"><UserRound size={20}/><div><strong>已登录，可直接查看本人订单</strong><button className="text-button" onClick={()=>navigate('account')}>前往我的订单 <ArrowRight size={14}/></button></div></div>}<form className="panel lookup-form" onSubmit={e => {
             e.preventDefault();
             lookup();
         }}><h3><Search size={19}/> 查询订单</h3><label>订单号<input required value={orderId} onChange={e => setOrderId(e.target.value)} placeholder="例如 PX20261013…"/></label><label>查询密钥<input required type="password" value={secret} onChange={e => setSecret(e.target.value)} placeholder="下单时获得的查询密钥"/></label><button className="primary" disabled={busy}>{busy ? '正在查询…' : '查询我的订单'}<ArrowRight size={16}/></button>{error && <p className="error-text">{error}</p>}</form><div className="panel local-orders"><h3><Clock3 size={18}/> 本机最近订单</h3><p>仅记录在当前浏览器，请妥善保存查询密钥。</p>{recent.length ? recent.map(o => <button key={o.id} onClick={() => lookup(o.id, o.secret)}><span>{o.id}</span><ChevronRight size={16}/></button>) : <div className="small-empty">当前浏览器暂无订单</div>}</div></div><div>{order ? <OrderSummary order={order} secret={secret} csrf={account?.customer?.csrf} catalog={catalog} busy={busy} update={setOrder} ticket={()=>setTicketOpen(true)} copy={copy} cancel={async()=>{setBusy(true);try{await api('orders/cancel',{id:orderId,secret},account?.customer?.csrf);await lookup();await refresh();}catch(e){setNotice((e as Error).message);}finally{setBusy(false);}}}/> : <div className="panel empty order-placeholder"><PackageCheck size={52}/><h3>订单信息将在这里显示</h3><p>查询后可查看未发货或已发货状态、物流单号，付款后显示赠送账号。</p></div>}</div></div></section> : <HelpCenter settings={catalog?.settings || {}} navigate={navigate}/>}

@@ -1,9 +1,10 @@
 # 品香 Pinxiang · 实体商品自助商城
 
-实体商品售卖网站与配套管理后台，项目专用仓库：**trandainho27-source/Pinxaing**。当前地址为私人演示站，示例商品不产生真实配送，赠送账号是不能登录 Telegram 的测试内容。
+实体商品售卖网站与配套管理后台，项目专用仓库：**trandainho27-source/Pinxaing**。正式域名为 `pinxiang.lol`，由用户的 Cloudflare Worker 承载；私人体验站保留独立数据库与配置。体验站示例商品不产生真实配送，赠送账号是不能登录 Telegram 的测试内容。
 
-- [打开商城](https://pinxiang-commerce.classylotus10.chatgpt.site)
-- [打开管理后台](https://pinxiang-commerce.classylotus10.chatgpt.site/admin)，点击「进入演示管理后台」
+- [打开正式商城](https://pinxiang.lol) · [邮箱登录 / 注册](https://pinxiang.lol/account)
+- [打开正式管理后台](https://pinxiang.lol/admin)
+- [私人体验站](https://pinxiang-commerce.classylotus10.chatgpt.site)，与正式环境分开
 - [操作说明](docs/OPERATIONS.md) · [产品规则](docs/PRODUCT.md) · [部署说明](docs/DEPLOY.md)
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/trandainho27-source/Pinxaing)
@@ -42,11 +43,11 @@ npm run build
 npm run verify:worker
 ```
 
-79 项测试包含 16 项邮箱账号 / 订单管理检查、25 项实体交易及升级兼容检查、38 项保留的历史模块回归。编译后的 Worker 在 workerd 中验证演示与正式配置流程；所有业务验证均使用隔离的测试数据库，不涉及真实付款、物流或 Telegram 登录。详情见 [验收记录](docs/VALIDATION.md)。
+81 项测试包含 18 项邮箱账号 / 订单管理检查、25 项实体交易及升级兼容检查、38 项保留的历史模块回归。编译后的 Worker 在 workerd 中验证演示与正式配置流程；所有业务验证均使用隔离的测试数据库，不涉及真实付款、物流或 Telegram 登录。详情见 [验收记录](docs/VALIDATION.md)。
 
 ## 客户邮箱登录
 
-已实现邮箱验证码流程，配置 `RESEND_API_KEY` 和 `EMAIL_FROM` 后可发送真实验证码。当前私人演示站尚未配置发信服务，因此真实邮箱验证暂不可用；可在登录页体验明确标注的演示验证码。演示账号不会被标记为真实邮箱已验证，正式环境拒绝演示身份。详见 [邮箱配置](docs/EMAIL.md)。
+已实现邮箱验证码注册 / 登录。运行时需配置 `RESEND_API_KEY`、`EMAIL_FROM`，并沿用有效的 `INVENTORY_KEY`。店主在后台「客户账号」查看逐项配置诊断，完成实际收信与登录后再确认正式可用。当前私人演示站尚未配置发信服务，因此真实邮箱验证暂不可用；可在登录页体验明确标注的演示验证码。演示账号不会被标记为真实邮箱已验证，正式环境拒绝演示身份。详见 [邮箱配置](docs/EMAIL.md)。
 
 ## 当前范围与后续接入
 

@@ -49,6 +49,7 @@ const prod=new Miniflare({...options,d1Databases:{DB:'physical-production-test-d
 try{
  const db=await migrate(prod),request=client(prod);assert.equal((await request('catalog')).products.length,0);await request('auth/demo',{},403);await request('orders/demo-pay',{},403);await request('customer/email/demo',{},403);await request('customer/email/code',{email:'test@example.com'},503);
  await request('auth/setup',{username:'worker-owner',password:'worker-test-password-2026',token:'worker-test-bootstrap'});
+ const emailStatus=await request('admin/customers');assert.equal(emailStatus.email_configuration.ready,false);assert.deepEqual(emailStatus.email_configuration.checks.map(c=>c.status),['missing','missing','configured']);assert.ok(!JSON.stringify(emailStatus).includes('b'.repeat(64)));
  await request('admin/categories',{id:'test-category',name:'测试实体商品',sort:0,active:true});
  await request('admin/products',{id:'test-product',category_id:'test-category',name:'测试实体商品',price:3900,min_qty:1,max_qty:10,active:true,icon_key:'cup'});
  await request('admin/inventory',{product_id:'test-product',delta:5,reason:'测试入库'});
@@ -70,7 +71,7 @@ const emailWorker=new Miniflare({...options,d1Databases:{DB:'email-production-te
  emails.push(await request.json());return Response.json({id:'mock-email-only'});
 }});
 try{
- await migrate(emailWorker);const request=client(emailWorker),result=await request('customer/email/code',{email:'Runtime@Example.com'});assert.equal(result.demo_code,undefined);assert.equal(emails.length,1);assert.deepEqual(emails[0].to,['runtime@example.com']);
+ await migrate(emailWorker);const request=client(emailWorker),session=await request('customer/session');assert.equal(session.email_ready,true);assert.equal(session.email_configuration,undefined);const result=await request('customer/email/code',{email:'Runtime@Example.com'});assert.equal(result.demo_code,undefined);assert.equal(emails.length,1);assert.deepEqual(emails[0].to,['runtime@example.com']);
  const code=emails[0].text.match(/\d{6}/)[0];await request('customer/email/verify',{challenge_id:result.challenge_id,code});const me=(await request('customer/session')).customer;assert.equal(me.is_demo,0);assert.ok(me.verified_at>0);await request('customer/logout',{all:true});await request('customer/orders',undefined,401);
  console.log('workerd email adapter passed: production email challenge and verification, mock provider only; no real emails sent.');
 }finally{await emailWorker.dispose();}

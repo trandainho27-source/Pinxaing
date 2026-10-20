@@ -14,6 +14,34 @@ test('email login fails closed without sender configuration; production rejects 
  assert.equal((await demo('customer/email/demo',{})).r.status,403);
  assert.equal((await demo('customer/email/verify',{challenge_id:ch.challenge_id,code:ch.demo_code})).r.status,400);
 });
+test('email readiness follows current runtime configuration and keeps diagnostics private',async()=>{
+ const s=await fixture();
+ const initial=await s.guest('customer/session');assert.equal(initial.d.email_ready,false);assert.equal(initial.r.headers.get('cache-control'),'no-store');
+ const missing=(await s.admin('admin/customers')).d.email_configuration;
+ assert.deepEqual(missing.checks.map((c:any)=>[c.name,c.status]),[['RESEND_API_KEY','missing'],['EMAIL_FROM','missing'],['INVENTORY_KEY','configured']]);
+ s.env.RESEND_API_KEY='private-runtime-fixture';s.env.EMAIL_FROM='品香 <login@auth.pinxiang.lol>';
+ const current=(await s.guest('customer/session')).d;assert.equal(current.email_ready,true);assert.equal(current.email_configuration,undefined);
+ const owner=await s.admin('admin/customers');assert.equal(owner.d.email_configuration.ready,true);assert.ok(owner.d.checked_at>0);
+ for(const secret of [s.env.RESEND_API_KEY,s.env.INVENTORY_KEY])assert.ok(!JSON.stringify(owner.d).includes(secret));
+ assert.equal((await s.guest('admin/customers')).r.status,401);
+ await s.admin('admin/staff',{username:'mail-operator',password:'operator-password-2026',role:'operator'});
+ const operator=client(s.env);assert.equal((await operator('auth/login',{username:'mail-operator',password:'operator-password-2026'})).r.status,200);assert.equal((await operator('admin/customers')).r.status,403);
+ delete s.env.RESEND_API_KEY;assert.equal((await s.guest('customer/session')).d.email_ready,false);
+ assert.equal((await s.guest('customer/email/code',{email:'buyer@example.com'})).r.status,503);
+ assert.equal(row(s,'SELECT count(*) AS n FROM email_challenges').n,0);
+});
+test('invalid email configuration identifies the broken field without creating challenges or leaking its value',async()=>{
+ const s=await fixture();s.env.RESEND_API_KEY='private-runtime-fixture';s.env.EMAIL_FROM='login@auth.pinxiang.lol';
+ for(const [name,value] of [['INVENTORY_KEY','secret-that-is-not-64-hex'],['EMAIL_FROM','private-invalid-sender'],['RESEND_API_KEY','key-with-a\nnewline'],['RESEND_API_KEY',{binding:'not-a-runtime-secret'}]] as const){
+  const previous=s.env[name];s.env[name]=value;
+  const state=(await s.admin('admin/customers')).d.email_configuration;assert.equal(state.ready,false);assert.equal(state.checks.find((c:any)=>c.name===name).status,'invalid');
+  assert.equal((await s.guest('customer/session')).d.email_ready,false);
+  const result=await s.guest('customer/email/code',{email:'buyer@example.com'});assert.equal(result.r.status,503);
+  assert.ok(!JSON.stringify(state).includes(typeof value==='string'?value:'not-a-runtime-secret'));s.env[name]=previous;
+ }
+ assert.equal(row(s,'SELECT count(*) AS n FROM email_challenges').n,0);
+ assert.equal((await s.guest('customer/session')).d.email_ready,true);
+});
 test('demo verification is single use, hashed at rest, and explicitly not a verified real mailbox',async()=>{
  const s=await fixture(),c=client(s.env),ch=(await c('customer/email/demo',{})).d;
  assert.equal(row(s,'SELECT count(*) AS n FROM customers').n,0);
