@@ -48,7 +48,11 @@ try{
 const prod=new Miniflare({...options,d1Databases:{DB:'physical-production-test-db'},bindings:{DEMO_MODE:'false',INVENTORY_KEY:'b'.repeat(64),BOOTSTRAP_TOKEN:'worker-test-bootstrap',PAYMENT_PROVIDER:'trc20',TRON_RECEIVING_ADDRESS:'historical-fixture',TRONGRID_API_KEY:'historical-fixture',PAYMENT_WEBHOOK_SECRET:'historical-fixture',DIDIPIFA_API_TOKEN:'historical-fixture',DIDIPIFA_PURCHASE_ENABLED:'true'}});
 try{
  const db=await migrate(prod),request=client(prod);assert.equal((await request('catalog')).products.length,0);await request('auth/demo',{},403);await request('orders/demo-pay',{},403);await request('customer/email/demo',{},403);await request('customer/email/code',{email:'test@example.com'},503);
+ const initial=await request('auth/status');assert.equal(initial.initialized,false);assert.equal(initial.setup_configured,true);
+ await db.prepare("INSERT INTO staff VALUES('demo-owner','demo','unused-demo-hash','owner',1,?)").bind(Date.now()).run();
+ const legacy=await request('auth/status');assert.equal(legacy.initialized,false);assert.equal(legacy.legacy_demo,true);
  await request('auth/setup',{username:'worker-owner',password:'worker-test-password-2026',token:'worker-test-bootstrap'});
+ assert.equal((await request('auth/status')).initialized,true);assert.equal((await db.prepare("SELECT active FROM staff WHERE id='demo-owner'").first()).active,0);
  const emailStatus=await request('admin/customers');assert.equal(emailStatus.email_configuration.ready,false);assert.deepEqual(emailStatus.email_configuration.checks.map(c=>c.status),['missing','missing','configured']);assert.ok(!JSON.stringify(emailStatus).includes('b'.repeat(64)));
  await request('admin/categories',{id:'test-category',name:'测试实体商品',sort:0,active:true});
  await request('admin/products',{id:'test-product',category_id:'test-category',name:'测试实体商品',price:3900,min_qty:1,max_qty:10,active:true,icon_key:'cup'});

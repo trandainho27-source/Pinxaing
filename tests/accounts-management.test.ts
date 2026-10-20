@@ -5,6 +5,42 @@ const reason='测试人员核对后的处理原因';
 const credentials=(o:any)=>({id:o.id,secret:o.secret});
 async function paid(s:any,extra:any=shipping){const o=(await s.guest('orders',cart(s.p.id,extra))).d;const r=await s.guest('orders/demo-pay',credentials(o));assert.equal(r.r.status,200);return {...r.d,secret:o.secret};}
 
+test('first-owner setup reports missing runtime token without requiring an admin login',async()=>{
+ const db=new DB(),env:any={DB:db,DEMO_MODE:'false'},guest=client(env);
+ const state=(await guest('auth/status')).d;assert.equal(state.initialized,false);assert.equal(state.setup_configured,false);assert.equal(state.legacy_demo,false);
+ const body={username:'first-owner',password:'owner-password-2026',token:'not-configured'};
+ assert.equal((await guest('auth/setup',body)).r.status,503);assert.equal(db.raw.prepare('SELECT count(*) AS n FROM staff').get()!.n,0);
+ env.BOOTSTRAP_TOKEN='private-bootstrap-test-token';assert.equal((await guest('auth/status')).d.setup_configured,true);assert.ok(!JSON.stringify((await guest('auth/status')).d).includes(env.BOOTSTRAP_TOKEN));
+ assert.equal((await guest('auth/setup',body)).r.status,403);
+ assert.equal((await guest('auth/setup',{...body,token:env.BOOTSTRAP_TOKEN})).r.status,200);assert.equal((await guest('auth/me')).d.username,'first-owner');
+});
+test('a legacy demo owner does not block authorized setup and its sessions cannot enter production',async()=>{
+ const s=await fixture(),order=(await s.guest('orders',cart(s.p.id))).d;
+ const before={products:row(s,'SELECT count(*) AS n FROM products').n,orders:row(s,'SELECT count(*) AS n FROM orders').n,gift:row(s,'SELECT ciphertext FROM telegram_gifts WHERE order_id=?',order.id).ciphertext};
+ s.env.DEMO_MODE='false';s.env.BOOTSTRAP_TOKEN='private-bootstrap-test-token';
+ const state=(await s.guest('auth/status')).d;assert.equal(state.initialized,false);assert.equal(state.legacy_demo,true);assert.equal(state.setup_configured,true);
+ assert.equal((await s.admin('auth/me')).r.status,401);assert.equal((await s.admin('admin/overview')).r.status,401);assert.equal((await s.guest('auth/demo',{})).r.status,403);
+ const payload={username:'real-owner',password:'owner-password-2026',token:'wrong'};
+ assert.equal((await s.guest('auth/setup',payload)).r.status,403);assert.equal(row(s,"SELECT active FROM staff WHERE id='demo-owner'").active,1);
+ assert.equal((await s.guest('auth/setup',{...payload,token:s.env.BOOTSTRAP_TOKEN})).r.status,200);
+ assert.equal((await s.guest('auth/me')).d.username,'real-owner');assert.equal((await s.guest('auth/status')).d.initialized,true);
+ assert.equal(row(s,"SELECT active FROM staff WHERE id='demo-owner'").active,0);assert.equal(row(s,"SELECT count(*) AS n FROM sessions WHERE staff_id='demo-owner'").n,0);
+ assert.equal(row(s,'SELECT count(*) AS n FROM products').n,before.products);assert.equal(row(s,'SELECT count(*) AS n FROM orders').n,before.orders);assert.equal(row(s,'SELECT ciphertext FROM telegram_gifts WHERE order_id=?',order.id).ciphertext,before.gift);
+});
+test('concurrent bootstrap has one winner and an existing real staff account cannot be overwritten',async()=>{
+ const db=new DB(),env:any={DB:db,DEMO_MODE:'false',BOOTSTRAP_TOKEN:'private-bootstrap-test-token'},a=client(env),b=client(env);
+ const payload={password:'owner-password-2026',token:env.BOOTSTRAP_TOKEN};
+ const result=await Promise.all([a('auth/setup',{...payload,username:'owner-one'}),b('auth/setup',{...payload,username:'owner-two'})]);
+ assert.deepEqual(result.map(x=>x.r.status).sort(),[200,409]);assert.equal(db.raw.prepare('SELECT count(*) AS n FROM staff').get()!.n,1);assert.equal(db.raw.prepare("SELECT count(*) AS n FROM audits WHERE action='auth.setup'").get()!.n,1);
+ const original=db.raw.prepare('SELECT * FROM staff').get();env.BOOTSTRAP_TOKEN='replacement-bootstrap-test-token';
+ assert.equal((await a('auth/status')).d.initialized,true);assert.equal((await a('auth/setup',{...payload,token:env.BOOTSTRAP_TOKEN,username:'replacement-owner'})).r.status,409);assert.deepEqual(db.raw.prepare('SELECT * FROM staff').get(),original);
+ const s=await fixture();await s.admin('admin/staff',{username:'existing-operator',password:'operator-password-2026',role:'operator'});s.env.DEMO_MODE='false';s.env.BOOTSTRAP_TOKEN=env.BOOTSTRAP_TOKEN;
+ assert.equal((await s.guest('auth/status')).d.initialized,true);assert.equal((await s.guest('auth/setup',{...payload,token:env.BOOTSTRAP_TOKEN,username:'new-owner'})).r.status,409);
+ const migrated=await fixture();migrated.db.raw.prepare("UPDATE staff SET username='027' WHERE id='demo-owner'").run();migrated.env.DEMO_MODE='false';migrated.env.BOOTSTRAP_TOKEN=env.BOOTSTRAP_TOKEN;
+ assert.equal((await migrated.guest('auth/status')).d.initialized,true);assert.equal((await migrated.admin('auth/me')).d.username,'027');assert.equal((await migrated.admin('admin/overview')).r.status,200);
+ assert.equal((await migrated.guest('auth/setup',{...payload,token:env.BOOTSTRAP_TOKEN,username:'replacement-owner'})).r.status,409);
+});
+
 test('email login fails closed without sender configuration; production rejects demo identities',async()=>{
  const s=await fixture();assert.equal((await s.guest('customer/session')).d.email_ready,false);
  assert.equal((await s.guest('customer/email/code',{email:'customer@example.com'})).r.status,503);

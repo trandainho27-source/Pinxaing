@@ -183,6 +183,7 @@ test('gift import deduplicates account identity, authenticates encryption, and e
 });
 test('production requires non-example gift inventory and never exposes demo catalog or demo payment',async()=>{
  const s=await fixture();await s.req('auth/demo',{});s.env.DEMO_MODE='false';assert.equal((await s.req('catalog')).d.products.length,0);assert.equal((await s.req('orders',orderBody(s.p.id))).r.status,400);
+ assert.equal((await s.req('admin/gifts')).r.status,401);assert.equal((await s.req('auth/setup',{username:'production-owner',password:'owner-password-2026',token:s.env.BOOTSTRAP_TOKEN})).r.status,200);
  s.db.raw.prepare('UPDATE products SET is_example=0 WHERE id=?').run(s.p.id);assert.equal((await s.req('orders',orderBody(s.p.id))).r.status,409);
  await s.req('admin/gifts',{codes:'REAL-POOL-TEST-FIXTURE | test-only-password'});const o=(await s.req('orders',orderBody(s.p.id))).d;assert.equal(o.demo,0);assert.equal(o.telegram_gift,null);assert.equal(o.telegram_gift_unlocked,false);await s.req('admin/orders',{id:o.id,reference:'real-fixture-manual',reason:'隔离测试登记已收款'});assert.equal((await s.req('orders/lookup',credential(o))).d.telegram_gift,'REAL-POOL-TEST-FIXTURE | test-only-password');assert.equal((await s.req('orders/demo-pay',credential(o))).r.status,403);
 });

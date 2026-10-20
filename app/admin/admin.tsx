@@ -10,6 +10,7 @@ import LaunchPanel from './launch-panel';
 import OrderManager from './order-manager';
 import OrderDetail from './order-detail';
 import EmailServicePanel from './email-service-panel';
+import BootstrapGuide from './bootstrap-guide';
 import BrandMark from '../brand-mark';
 import { useDialogs } from '@/hooks/use-dialogs';
 import type { Staff, Product, Category } from '@/lib/commerce/types';
@@ -20,11 +21,14 @@ export default function Admin() {
     const [me, setMe] = useState<Staff | null>(null), [auth, setAuth] = useState<{
         initialized: boolean;
         demo: boolean;
+        setup_configured?: boolean;
+        legacy_demo?: boolean;
     } | null>(null), [loading, setLoading] = useState(true), [section, setSection] = useState('overview'), [data, setData] = useState<any>(null), [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false), [sidebar, setSidebar] = useState(false);
     const [username, setUsername] = useState(''), [password, setPassword] = useState(''), [token, setToken] = useState(''), [editor, setEditor] = useState<any>(null), [editType, setEditType] = useState(''), [orderSearch, setOrderSearch] = useState(''), [orderStatus, setOrderStatus] = useState(''), [page, setPage] = useState(1), [reason, setReason] = useState(''), [reference, setReference] = useState(''), [reply, setReply] = useState(''), [closed, setClosed] = useState(true), [oldPassword, setOldPassword] = useState(''), [newPassword, setNewPassword] = useState('');
     const [detailId,setDetailId]=useState(''), [productSearch,setProductSearch]=useState('');
     useDialogs([editor?'editor':'',detailId].join('|'),()=>{if(detailId)setDetailId('');else setEditor(null);});
     async function initialize() {
+        setError('');
         try {
             const a = await api('auth/status');
             setAuth(a);
@@ -35,6 +39,7 @@ export default function Admin() {
             }
         }
         catch (e) {
+            setAuth(null);
             setError((e as Error).message);
         }
         finally {
@@ -122,11 +127,25 @@ export default function Admin() {
         URL.revokeObjectURL(url);
     }
     const editable = me?.role === 'owner' || me?.role === 'operator';
-    if (!me)
-        return <div className="admin-login"><a href="/" className="brand"><span className="brand-mark"><BrandMark /></span><span>品香<small>PINXIANG</small></span></a><div className="login-card"><span className="login-icon"><Lock size={25}/></span><div className="eyebrow">PINXIANG CONSOLE</div><h1>{auth && !auth.initialized && !auth.demo ? '初始化你的商城' : '欢迎回到管理后台'}</h1><p>{auth && !auth.initialized && !auth.demo ? '创建店主账号，开始管理实体商品业务。' : '管理商品、库存、订单与客户服务。'}</p>{loading ? <div className="small-empty">正在连接管理系统…</div> : <><form onSubmit={e => {
-            e.preventDefault();
-            login(auth && !auth.initialized && !auth.demo ? 'setup' : 'login');
-        }}>{auth && !auth.initialized && !auth.demo && <label>初始化令牌<input required type="password" value={token} onChange={e => setToken(e.target.value)} placeholder="Cloudflare 中配置的 BOOTSTRAP_TOKEN"/></label>}<label>管理员账号<input required autoComplete="username" value={username} onChange={e => setUsername(e.target.value)} placeholder="输入管理员账号"/></label><label>密码<input required type="password" autoComplete="current-password" minLength={auth && !auth.initialized && !auth.demo ? 12 : undefined} value={password} onChange={e => setPassword(e.target.value)} placeholder="输入管理员密码"/></label>{error && <div className="error-text">{error}</div>}<button className="primary" disabled={busy}>{busy ? '正在验证…' : auth && !auth.initialized && !auth.demo ? '创建店主账号' : '安全登录'} <ArrowRight size={17}/></button></form>{auth?.demo && <div className="demo-login"><span>想先了解系统如何运作？</span><button className="secondary" disabled={busy} onClick={() => login('demo')}>进入演示管理后台 <ArrowUpRight size={16}/></button><small>使用测试数据，演示入口在正式环境关闭。</small></div>}</>}<a className="text-button" href="/">返回商品商城 <ArrowUpRight size={14}/></a></div><small className="login-foot">品香运营管理系统 · 安全连接</small></div>;
+    const needsSetup=!!auth&&!auth.initialized&&!auth.demo;
+    if (!me) return <div className="admin-login">
+        <a href="/" className="brand"><span className="brand-mark"><BrandMark /></span><span>品香<small>PINXIANG</small></span></a>
+        <div className="login-card"><span className="login-icon"><Lock size={25}/></span><div className="eyebrow">PINXIANG CONSOLE</div>
+            <h1>{needsSetup?'创建你的店主账号':'欢迎回到管理后台'}</h1>
+            <p>{needsSetup?'首次开通只需设置令牌，然后创建账号和密码。':'管理商品、库存、订单与客户服务。'}</p>
+            {loading?<div className="small-empty">正在连接管理系统…</div>:!auth?<div><p className="error-text" role="alert">{error||'无法读取后台开通状态，请重新连接。'}</p><button className="secondary" onClick={initialize}>重新连接</button></div>:<>
+                <form onSubmit={e=>{e.preventDefault();login(needsSetup?'setup':'login');}}>
+                    {needsSetup&&<BootstrapGuide configured={auth.setup_configured===true} legacyDemo={auth.legacy_demo===true} token={token} setToken={setToken} refresh={initialize}/>}
+                    <label>管理员账号<input required autoComplete="username" pattern="[a-zA-Z0-9_-]{3,32}" value={username} onChange={e=>setUsername(e.target.value)} placeholder={needsSetup?'设置 3–32 位字母、数字或下划线账号':'输入管理员账号'}/></label>
+                    <label>{needsSetup?'设置密码（至少 12 位）':'密码'}<input required type="password" autoComplete={needsSetup?'new-password':'current-password'} minLength={needsSetup?12:undefined} maxLength={128} value={password} onChange={e=>setPassword(e.target.value)} placeholder={needsSetup?'设置并妥善保存你的后台密码':'输入管理员密码'}/></label>
+                    {error&&<div className="error-text" role="alert">{error}</div>}
+                    <button className="primary" disabled={busy||(needsSetup&&!auth.setup_configured)}>{busy?'正在验证…':needsSetup?'创建店主账号':'安全登录'}<ArrowRight size={17}/></button>
+                </form>
+                {auth.demo&&<div className="demo-login"><span>想先了解系统如何运作？</span><button className="secondary" disabled={busy} onClick={()=>login('demo')}>进入演示管理后台 <ArrowUpRight size={16}/></button><small>使用测试数据，演示入口在正式环境关闭。</small></div>}
+            </>}
+            <a className="text-button" href="/">返回商品商城 <ArrowUpRight size={14}/></a>
+        </div><small className="login-foot">品香运营管理系统 · 安全连接</small>
+    </div>;
     return <div className="admin-app"><aside className={'admin-sidebar ' + (sidebar ? 'open' : '')}><a href="/" className="brand"><span className="brand-mark"><BrandMark size={25}/></span><span>品香<small>PINXIANG CONSOLE</small></span></a><div className="workspace"><span className="workspace-avatar">品</span><div>品香实体商城<small>{auth?.demo ? '演示工作空间' : '商家工作空间'}</small></div><ChevronRight size={15}/></div><div className="nav-caption">业务管理</div><nav>{sections.filter(([key]) => me.role === 'owner' || me.role === 'operator' ? me.role === 'owner' || !['staff', 'audits', 'settings', 'payment', 'gifts', 'customers'].includes(key) : ['overview', 'orders', 'tickets'].includes(key)).map(([key, label, Icon]) => <button key={key} className={section === key ? 'active' : ''} onClick={() => change(key)}><Icon size={18}/>{label}{section === key && <span />}</button>)}</nav><div className="sidebar-bottom"><a href="/" target="_blank" rel="noreferrer"><GlobeIcon /> 访问商城 <ArrowUpRight size={15}/></a><div className="admin-profile"><span>{me.username.slice(0, 1).toUpperCase()}</span><div>{me.username}<small>{roleNames[me.role]}</small></div><button aria-label="退出登录" onClick={async () => {
         await api('auth/logout', {}, me.csrf);
         setMe(null);

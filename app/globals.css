@@ -2980,3 +2980,16 @@ button:focus-visible,a:focus-visible{outline-color:#81ad9d}
 .email-service-actions{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
 .email-service-actions small{color:var(--muted,#68736b)}
 .login-service-status{display:flex;align-items:flex-start;flex-direction:column;gap:10px;margin:18px 0}
+.bootstrap-guide{margin:22px 0;text-align:left;padding:18px;border:1px solid var(--line);border-radius:12px;background:#f8faf9}
+.bootstrap-guide h2{display:flex;align-items:center;gap:8px;font-size:17px;margin:0 0 10px}
+.bootstrap-guide>p,.bootstrap-guide li{font-size:13px;line-height:1.7}
+.bootstrap-guide ol{padding-left:20px;margin:14px 0}
+.bootstrap-guide li+li{margin-top:10px}
+.bootstrap-guide code{overflow-wrap:anywhere}
+.bootstrap-tools,.bootstrap-check{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:14px 0}
+.bootstrap-check{justify-content:space-between}
+.bootstrap-check .error-text,.bootstrap-check .success-text{font-size:12px;margin:0}
+.bootstrap-token{position:relative}
+.bootstrap-token input{padding-right:42px;min-width:0}
+.bootstrap-token .icon-button{position:absolute;right:5px;top:50%;transform:translateY(-50%)}
+.bootstrap-guide .hint{margin:10px 0 0;line-height:1.7}

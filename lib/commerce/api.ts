@@ -10,6 +10,14 @@ import {emailConfiguration} from './email-configuration.ts';
 import {listOrders,orderDetail,manageOrders} from './order-management.ts';
 export const SHIPPING_FEE = 2000;
 const GIFT_CONTEXT = 'pinxiang-telegram-gift';
+const formalStaff = "NOT (id='demo-owner' AND username='demo' AND role='owner')";
+function isDemoStaff(person:Staff) {
+    return person.id==='demo-owner'&&person.username==='demo'&&person.role==='owner';
+}
+function bootstrapConfigured(env:RuntimeEnv) {
+    const token=env.BOOTSTRAP_TOKEN;
+    return typeof token==='string' && token.length>0 && token.length<=128 && token.trim()===token;
+}
 const categoryQuery = `SELECT c.* FROM categories c WHERE NOT EXISTS(SELECT 1 FROM products p WHERE p.category_id=c.id AND p.product_type='digital') OR EXISTS(SELECT 1 FROM products p WHERE p.category_id=c.id AND p.product_type='physical') ORDER BY c.sort`;
 const productQuery = `SELECT p.*,coalesce(s.available,0) AS stock,coalesce(s.reserved,0) AS reserved,coalesce(s.sold,0) AS sold FROM products p LEFT JOIN physical_stock s ON s.product_id=p.id`;
 function guard(db:D1Database, condition:string, ...args:any[]) {
@@ -127,21 +135,27 @@ export async function handleApi(request:Request,env:RuntimeEnv):Promise<Response
         if(customer&&method==='POST'&&!path.startsWith('admin/')&&!path.startsWith('auth/'))customerCsrf(customer,request);
         if(path==='catalog'&&method==='GET')return json(await catalog(db,env));
         if (path === 'auth/status' && method === 'GET') {
-            const count = await first<{
-                n: number;
-            }>(db, 'SELECT count(*) AS n FROM staff');
-            return json({ initialized: !!count!.n, demo: env.DEMO_MODE === 'true' });
+            const count = await first<{total:number;formal:number}>(db, `SELECT count(*) AS total,coalesce(sum(CASE WHEN ${formalStaff} THEN 1 ELSE 0 END),0) AS formal FROM staff`);
+            return json({ initialized: count!.formal>0, demo: env.DEMO_MODE === 'true', setup_configured: count!.formal===0&&bootstrapConfigured(env), legacy_demo: count!.formal===0&&count!.total>0 });
         }
         if (path === 'auth/setup' && method === 'POST') {
             await limit(db, request, 'setup', 5);
             const b = await body(request);
-            if (!env.BOOTSTRAP_TOKEN || !safeEqual(str(b.token, 128), env.BOOTSTRAP_TOKEN))
+            if(!bootstrapConfigured(env))fail(503,'请先在 Cloudflare 的「变量和机密」中设置 BOOTSTRAP_TOKEN 并部署，再创建店主账号。');
+            if (!safeEqual(str(b.token, 128), env.BOOTSTRAP_TOKEN!))
                 fail(403, '初始化令牌不正确');
             if (!/^[a-zA-Z0-9_-]{3,32}$/.test(b.username || '') || typeof b.password !== 'string' || b.password.length < 12 || b.password.length > 128)
                 fail(400, '账号需为 3–32 位字母或数字，密码至少 12 位');
+            if(b.username==='demo')fail(400,'demo 是演示账号名称，请为正式店主使用其他账号名');
             const id = uid();
             try {
-                await db.batch([stmt(db, "INSERT INTO staff SELECT ?,?,?,'owner',1,? WHERE NOT EXISTS(SELECT 1 FROM staff)", id, b.username, await hashPassword(b.password), now()), audit(db, id, 'auth.setup', 'owner')]);
+                await db.batch([
+                    stmt(db, `INSERT INTO staff SELECT ?,?,?,'owner',1,? WHERE NOT EXISTS(SELECT 1 FROM staff WHERE ${formalStaff})`, id, b.username, await hashPassword(b.password), now()),
+                    ...guard(db,'EXISTS(SELECT 1 FROM staff WHERE id=?)',id),
+                    stmt(db,"UPDATE staff SET active=0 WHERE id='demo-owner' AND username='demo' AND role='owner'"),
+                    stmt(db,"DELETE FROM sessions WHERE staff_id='demo-owner'"),
+                    audit(db, id, 'auth.setup', 'owner')
+                ]);
             }
             catch {
                 fail(409, '管理员已初始化');
@@ -171,8 +185,11 @@ export async function handleApi(request:Request,env:RuntimeEnv):Promise<Response
             await seed(db, env, id);
             return loginSession(db, id);
         }
-        if (path === 'auth/me' && method === 'GET')
-            return json(await authenticated(db, request));
+        if (path === 'auth/me' && method === 'GET') {
+            const person=await authenticated(db,request);
+            if(env.DEMO_MODE!=='true'&&isDemoStaff(person))fail(401,'请先创建并登录正式店主账号');
+            return json(person);
+        }
         if (path === 'auth/logout' && method === 'POST') {
             const p = await authenticated(db, request);
             await stmt(db, 'DELETE FROM sessions WHERE staff_id=? AND csrf=?', p.id, p.csrf).run();
@@ -197,7 +214,9 @@ export async function handleApi(request:Request,env:RuntimeEnv):Promise<Response
         if(path==='payments/check')fail(503,'支付查询接口已预留，尚未接通');
         if(path.startsWith('admin/')){
             const section=path.split('/')[1],roleMap:Record<string,string[]>={products:['owner','operator'],inventory:['owner','operator'],gifts:['owner'],customers:['owner'],shipment:['owner','operator'],categories:['owner','operator'],settings:['owner'],staff:['owner'],audits:['owner'],payment:['owner'],seed:['owner']};
-            const p=await authenticated(db,request,roleMap[section]);await expire(db);
+            const p=await authenticated(db,request,roleMap[section]);
+            if(env.DEMO_MODE!=='true'&&isDemoStaff(p))fail(401,'请先创建并登录正式店主账号');
+            await expire(db);
             if(section==='payment'&&method==='GET')return json({methods:paymentMethods,shippingFee:SHIPPING_FEE,demo:env.DEMO_MODE==='true'});
             if(section==='payment'&&method==='POST')fail(503,'三个支付接口均已预留，暂未接通');
             if(section==='supplier')fail(410,'实体商城不启用原数字货源采购接口');
