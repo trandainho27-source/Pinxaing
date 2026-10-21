@@ -38,5 +38,16 @@
       "* * * * *"
     ]
   },
-  "keep_vars": true
+  "keep_vars": true,
+  "unsafe": {
+    "metadata": {
+      "keep_bindings": [
+        "plain_text",
+        "json",
+        "secret_text",
+        "secret_key",
+        "r2_bucket"
+      ]
+    }
+  }
 }

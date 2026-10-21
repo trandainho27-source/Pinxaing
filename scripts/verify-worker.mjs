@@ -8,9 +8,9 @@ files.sort((a,b)=>a==='index.js'?-1:b==='index.js'?1:a.localeCompare(b));
 let outbound=0;
 const options={modules:files.map(f=>({type:'ESModule',path:resolve('dist/server',f)})),modulesRoot:resolve('dist/server'),compatibilityDate:'2026-05-15',compatibilityFlags:['nodejs_compat'],assets:{directory:resolve('dist/client'),binding:'ASSETS',routerConfig:{has_user_worker:true,invoke_user_worker_ahead_of_assets:true}},cf:false,outboundService:()=>{outbound++;throw Error('Physical commerce must not call unconnected payment or supplier services');}};
 async function migrate(mf){const db=await mf.getD1Database('DB');for(const file of readdirSync('drizzle').filter(f=>f.endsWith('.sql')).sort())for(const sql of readFileSync('drizzle/'+file,'utf8').split('--> statement-breakpoint').map(s=>s.trim()).filter(Boolean))await db.prepare(sql).run();return db;}
-function client(mf){const cookies=new Map();let staffCsrf='',customerCsrf='';return async(path,body,status=200)=>{
+function client(mf){const cookies=new Map();let staffCsrf='',customerCsrf='';return async(path,body,status=200,extra={})=>{
  const csrf=path.startsWith('admin/')||path.startsWith('auth/')?staffCsrf:customerCsrf;
- const r=await mf.dispatchFetch('https://store.test/api/'+path,{method:body===undefined?'GET':'POST',headers:{origin:'https://store.test',...(body===undefined?{}:{'content-type':'application/json'}),cookie:[...cookies].map(([k,v])=>k+'='+v).join('; '),'x-csrf-token':csrf},...(body===undefined?{}:{body:JSON.stringify(body)})});
+ const r=await mf.dispatchFetch('https://store.test/api/'+path,{method:body===undefined?'GET':'POST',headers:{origin:'https://store.test',...(body===undefined?{}:{'content-type':'application/json'}),cookie:[...cookies].map(([k,v])=>k+'='+v).join('; '),'x-csrf-token':csrf,...extra},...(body===undefined?{}:{body:body instanceof Uint8Array?body:JSON.stringify(body)})});
  const d=await r.json();assert.equal(r.status,status,path+': '+JSON.stringify(d));if(r.headers.has('set-cookie')){const [key,value]=r.headers.get('set-cookie').split(';')[0].split('=');cookies.set(key,value);if(d.csrf){if(key==='px_customer')customerCsrf=d.csrf;else staffCsrf=d.csrf;}}return d;
 };}
 const mf=new Miniflare({...options,d1Databases:{DB:'physical-demo-db'},bindings:{DEMO_MODE:'true',INVENTORY_KEY:'b'.repeat(64)}});
@@ -70,12 +70,32 @@ try{
 }finally{await prod.dispose();}
 
 let emails=[];
-const emailWorker=new Miniflare({...options,d1Databases:{DB:'email-production-test-db'},bindings:{DEMO_MODE:'false',INVENTORY_KEY:'b'.repeat(64),RESEND_API_KEY:'fake-runtime-mail-key',EMAIL_FROM:'Pinxiang <login@example.com>'},outboundService:async request=>{
- assert.equal(request.url,'https://api.resend.com/emails');assert.equal(request.method,'POST');assert.equal(request.headers.get('authorization'),'Bearer fake-runtime-mail-key');assert.match(request.headers.get('idempotency-key'),/^pinxiang-login\//);
+const emailWorker=new Miniflare({...options,d1Databases:{DB:'email-production-test-db'},r2Buckets:{BUCKET:'product-images-test'},bindings:{DEMO_MODE:'false',BOOTSTRAP_TOKEN:'worker-test-bootstrap',INVENTORY_KEY:'b'.repeat(64),RESEND_API_KEY:'fake-runtime-mail-key',EMAIL_FROM:'Pinxiang <login@example.com>'},outboundService:async request=>{
+ assert.equal(request.url,'https://api.resend.com/emails');assert.equal(request.method,'POST');assert.equal(request.headers.get('authorization'),'Bearer fake-runtime-mail-key');assert.match(request.headers.get('idempotency-key'),/^pinxiang-(login|order)\//);
  emails.push(await request.json());return Response.json({id:'mock-email-only'});
 }});
 try{
  await migrate(emailWorker);const request=client(emailWorker),session=await request('customer/session');assert.equal(session.email_ready,true);assert.equal(session.email_configuration,undefined);const result=await request('customer/email/code',{email:'Runtime@Example.com'});assert.equal(result.demo_code,undefined);assert.equal(emails.length,1);assert.deepEqual(emails[0].to,['runtime@example.com']);
- const code=emails[0].text.match(/\d{6}/)[0];await request('customer/email/verify',{challenge_id:result.challenge_id,code});const me=(await request('customer/session')).customer;assert.equal(me.is_demo,0);assert.ok(me.verified_at>0);await request('customer/logout',{all:true});await request('customer/orders',undefined,401);
- console.log('workerd email adapter passed: production email challenge and verification, mock provider only; no real emails sent.');
+ const code=emails[0].text.match(/\d{6}/)[0];await request('customer/email/verify',{challenge_id:result.challenge_id,code});const me=(await request('customer/session')).customer;assert.equal(me.is_demo,0);assert.ok(me.verified_at>0);
+ await request('auth/setup',{username:'feature-owner',password:'feature-password-2026',token:'worker-test-bootstrap'});
+ await request('admin/categories',{id:'features',name:'功能测试',sort:0,active:true});
+ const png=Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jXioAAAAASUVORK5CYII=','base64'));
+ const image=await request('admin/media/upload',png,201,{'content-type':'image/png'});const imageResponse=await emailWorker.dispatchFetch('https://store.test'+image.url);assert.equal(imageResponse.headers.get('content-type'),'image/png');assert.deepEqual(new Uint8Array(await imageResponse.arrayBuffer()),png);
+ const product={category_id:'features',name:'功能测试商品',min_qty:1,max_qty:10,active:true,images:[image.url,'https://images.example/second.png']};
+ await request('admin/products',{...product,id:'ordinary',price:3900});await request('admin/products',{...product,id:'other',price:990,shipping_class:'other'});
+ for(const id of ['ordinary','other'])await request('admin/inventory',{product_id:id,delta:5,reason:'隔离测试入库'});
+ await request('admin/gifts',{codes:'RUNTIME-GIFT-1 | fixture-only\nRUNTIME-GIFT-2 | fixture-only'});
+ assert.equal((await request('admin/products')).media_ready,true);
+ const topup=await request('customer/wallet/topup',{amount:20000,method:'wechat',request_key:'f'.repeat(64)},201);assert.equal((await request('customer/wallet')).balance,0);
+ const confirm={id:topup.id,action:'approve',reference:'fixture-topup-only',reason:'隔离测试核对，不涉及真实资金'};await request('admin/wallet',confirm);assert.equal((await request('admin/wallet',confirm)).idempotent,true);
+ const free=await request('orders',{acceptedTerms:true,items:[{id:'other',quantity:1}],contact_email:'runtime@example.com',payment_method:'balance'},201);assert.equal(free.shipping_fee,0);assert.equal(free.total,990);assert.equal(free.telegram_gift,null);
+ await request('customer/wallet/pay',{id:free.id});assert.equal((await request('customer/wallet/pay',{id:free.id})).idempotent,true);const paid=await request('orders/lookup',{id:free.id});assert.equal(paid.telegram_gift_unlocked,true);assert.equal(paid.shipping_status,'pending');assert.equal((await request('customer/wallet')).balance,19010);
+ const refund={id:free.id,action:'refund',reason:'隔离测试退款，不涉及真实资金'};await request('admin/orders',refund);assert.equal((await request('admin/orders',refund)).idempotent,true);assert.equal((await request('customer/wallet')).balance,20000);
+ const mixed=await request('orders',{acceptedTerms:true,items:[{id:'other',quantity:1},{id:'ordinary',quantity:1}],contact_email:'runtime@example.com',shipping_fee:0},201);assert.equal(mixed.shipping_fee,2000);assert.equal(mixed.total,6890);
+ await request('admin/orders',{id:mixed.id,reference:'fixture-manual-only',reason:'隔离测试核对，不涉及真实资金'});
+ const notices=(await request('admin/notifications')).notifications;assert.equal(notices.length,4);assert.ok(notices.every(n=>n.status==='sent'));assert.equal(emails.filter(e=>e.subject.includes('购买成功')).length,2);assert.equal(emails.filter(e=>e.subject.includes('订单已创建')).length,2);assert.ok(!JSON.stringify(emails).includes('RUNTIME-GIFT-'));
+ const ledger=(await request('customer/wallet')).ledger;assert.equal(ledger.length,3);assert.equal(ledger.reduce((sum,l)=>sum+l.delta,0),20000);
+ await (await emailWorker.getWorker()).scheduled({cron:'* * * * *'});assert.equal(emails.length,5);
+ await request('customer/logout',{all:true});await request('customer/orders',undefined,401);
+ console.log('workerd upgrade passed: email login, R2 upload and image retrieval, free and mixed shipping, topup approval, balance purchase/refund, notification outbox, and ledger totals. Mock email provider only; no real emails or funds.');
 }finally{await emailWorker.dispose();}

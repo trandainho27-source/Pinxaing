@@ -296,7 +296,7 @@ export async function handleApi(request: Request, env: RuntimeEnv): Promise<Resp
             const id = 'PX' + new Date().toISOString().slice(0, 10).replaceAll('-', '') + randomToken().slice(0, 12).toUpperCase(), secret = randomToken(), ts = now();
             const statements = [stmt(db, 'INSERT INTO orders(id,lookup_hash,contact,total,status,ready,demo,created_at,expires_at) VALUES(?,?,?,?,\'pending\',0,?,?,?)', id, await sha(secret), contact, total, env.DEMO_MODE === 'true' ? 1 : 0, ts, ts + 15 * 60000)];
             for (const { p, q } of lines) {
-                statements.push(stmt(db, 'INSERT INTO order_items VALUES(?,?,?,?,?,?)', uid(), id, p.id, p.name, p.price, q));
+                statements.push(stmt(db, 'INSERT INTO order_items(id,order_id,product_id,product_name,price,quantity) VALUES(?,?,?,?,?,?)', uid(), id, p.id, p.name, p.price, q));
                 statements.push(stmt(db, "UPDATE inventory SET status='reserved',order_id=? WHERE id IN(SELECT id FROM inventory WHERE product_id=? AND status='available' ORDER BY created_at,id LIMIT ?)", id, p.id, q));
             }
             statements.push(...reservationGuard(db, id), stmt(db, 'UPDATE orders SET ready=1 WHERE id=?', id));

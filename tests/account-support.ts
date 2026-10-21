@@ -55,7 +55,7 @@ export function client(env:any) {
  const cookies=new Map<string,string>();let staffCsrf='',customerCsrf='';
  return async(path:string,b?:any,extra:Record<string,string>={})=>{
   const method=b===undefined?'GET':'POST';
-  const r=await handleApi(new Request('https://store.test/api/'+path,{method,headers:{origin:'https://store.test',...(b===undefined?{}:{'content-type':'application/json'}),cookie:[...cookies].map(([k,v])=>k+'='+v).join('; '),'x-csrf-token':path.startsWith('admin/')||path.startsWith('auth/')?staffCsrf:customerCsrf,...extra},...(b===undefined?{}:{body:JSON.stringify(b)})}),env);
+  const r=await handleApi(new Request('https://store.test/api/'+path,{method,headers:{origin:'https://store.test',...(b===undefined?{}:{'content-type':'application/json'}),cookie:[...cookies].map(([k,v])=>k+'='+v).join('; '),'x-csrf-token':path.startsWith('admin/')||path.startsWith('auth/')?staffCsrf:customerCsrf,...extra},...(b===undefined?{}:{body:b instanceof Uint8Array?new Uint8Array(b).buffer:JSON.stringify(b)})}),env);
   const d=await r.json() as any,header=r.headers.get('set-cookie');
   if(header){const [key,value]=header.split(';')[0].split('=');cookies.set(key,value);if(d.csrf){if(key==='px_customer')customerCsrf=d.csrf;else staffCsrf=d.csrf;}}
   return {r,d};

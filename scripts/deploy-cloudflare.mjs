@@ -17,6 +17,14 @@ try{
   binding.database_id=found.uuid;
   writeFileSync(rootConfig,JSON.stringify(config,null,2)+'\n');
  }
+ // Existing dashboard R2 bindings are retained by keep_bindings in wrangler.json.
+ // To declare an existing bucket from CI, set this non-secret build variable.
+ const imageBucket=process.env.R2_BUCKET_NAME?.trim();
+ if(imageBucket){
+  if(!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(imageBucket))throw new Error('Invalid R2_BUCKET_NAME.');
+  config.r2_buckets=[...(config.r2_buckets||[]).filter(x=>x.binding!=='BUCKET'),{binding:'BUCKET',bucket_name:imageBucket}];
+  writeFileSync(rootConfig,JSON.stringify(config,null,2)+'\n');
+ }
  // migrations apply skips confirmation in CI; unlike d1 execute it has no --yes flag.
  run(['d1','migrations','apply','DB','--remote','--config',rootConfig]);
  run(['deploy','--config',rootConfig]);

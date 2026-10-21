@@ -1,24 +1,22 @@
 import type {Customer, RuntimeEnv} from './types.ts';
 import {uid, randomToken, sha, hmac, safeEqual} from './security.ts';
-import {all, first, stmt, now, fail, json, body, str, limit, audit} from './api-common.ts';
+import {all, first, stmt, now, fail, json, body, str, limit, audit, transactionGuard} from './api-common.ts';
+import {customerWallet} from './wallet.ts';
 import {emailConfiguration} from './email-configuration.ts';
 const TTL = 10 * 60000, SESSION_TTL = 7 * 86400000;
 const cookie = (token:string, age=604800) => `px_customer=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${age}`;
-export function transactionGuard(db:D1Database, condition:string, ...values:any[]) {
-    const id=uid();
-    return [stmt(db,`INSERT INTO transaction_guards(id,passed) SELECT ?,CASE WHEN ${condition} THEN 1 ELSE 0 END`,id,...values),stmt(db,'DELETE FROM transaction_guards WHERE id=?',id)];
-}
+export {transactionGuard} from './api-common.ts';
 export function emailReady(env:RuntimeEnv) {return emailConfiguration(env).ready;}
 export async function customerSession(db:D1Database, env:RuntimeEnv, request:Request, required=false) {
     const token=request.headers.get('cookie')?.split(';').map(x=>x.trim()).find(x=>x.startsWith('px_customer='))?.slice(12);
-    const customer=token?await first<Customer>(db,`SELECT c.id,c.email,c.display_name,c.recipient,c.contact,c.shipping_address,c.verified_at,c.is_demo,s.csrf FROM customer_sessions s JOIN customers c ON c.id=s.customer_id WHERE s.hash=? AND s.expires_at>? AND c.active=1 AND (c.is_demo=0 OR ?=1)`,await sha(token),now(),env.DEMO_MODE==='true'?1:0):null;
+    const customer=token?await first<Customer>(db,`SELECT c.id,c.email,c.display_name,c.recipient,c.contact,c.shipping_address,c.verified_at,c.is_demo,s.csrf,coalesce((SELECT balance FROM wallet_accounts WHERE customer_id=c.id),0) AS wallet_balance FROM customer_sessions s JOIN customers c ON c.id=s.customer_id WHERE s.hash=? AND s.expires_at>? AND c.active=1 AND (c.is_demo=0 OR ?=1)`,await sha(token),now(),env.DEMO_MODE==='true'?1:0):null;
     if(!customer && required)fail(401,'请先登录，或使用订单号与查询密钥查询');
     return customer;
 }
 export function customerCsrf(customer:Customer, request:Request) {
     if(request.method!=='GET'&&!safeEqual(request.headers.get('x-csrf-token')||'',customer.csrf))fail(403,'账号安全校验失败，请刷新页面后重试');
 }
-function normalizeEmail(value:unknown) {
+export function normalizeEmail(value:unknown) {
     const email=str(value,255).toLowerCase();
     if(typeof value!=='string'||value.trim().length>254||!/^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,63}$/.test(email)||email.includes('..'))fail(400,'请输入有效邮箱地址');
     return email;
@@ -75,6 +73,7 @@ export async function handleCustomerApi(db:D1Database,env:RuntimeEnv,request:Req
     if(path==='customer/email/demo'&&method==='POST')return challenge(db,env,request,{},true);
     if(path==='customer/email/verify'&&method==='POST')return verify(db,env,request,await body(request));
     const c=(await customerSession(db,env,request,true))!;customerCsrf(c,request);
+    if(path.startsWith('customer/wallet'))return customerWallet(db,env,request,path,c,url);
     if(path==='customer/logout'&&method==='POST'){
         const b=await body(request);await stmt(db,'DELETE FROM customer_sessions WHERE customer_id=?'+(b.all===true?'':' AND csrf=?'),...([c.id,...(b.all===true?[]:[c.csrf])])).run();
         return json({ok:true},200,{'Set-Cookie':cookie('',0)});

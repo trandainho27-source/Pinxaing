@@ -1,5 +1,6 @@
 export interface RuntimeEnv {
     DB?: D1Database;
+    BUCKET?: R2Bucket;
     INVENTORY_KEY?: string;
     BOOTSTRAP_TOKEN?: string;
     DEMO_MODE?: string;
@@ -14,6 +15,8 @@ export interface RuntimeEnv {
     DIDIPIFA_PURCHASE_ENABLED?: string;
 }
 export interface Product {
+    shipping_class?: string;
+    images_json?: string;
     product_type?: string;
     image_url?: string;
     id: string;
@@ -51,6 +54,8 @@ export interface Staff {
     csrf?: string;
 }
 export interface Order {
+    contact_email?: string;
+    notifications?: {event:string;status:string;sent_at:number|null}[];
     customer_id?: string | null;
     shipment_group_id?: string | null;
     order_type?: string;
@@ -74,6 +79,7 @@ export interface Order {
     demo: number;
     payment?: PaymentInvoice | null;
     items: {
+        shipping_exempt?: number;
         product_name: string;
         quantity: number;
         price: number;
@@ -83,6 +89,7 @@ export interface Order {
     tickets?: Ticket[];
 }
 export interface Customer {
+    wallet_balance?: number;
     id: string;
     email: string;
     display_name: string;

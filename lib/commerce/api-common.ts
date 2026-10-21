@@ -75,3 +75,8 @@ async function loginSession(db: D1Database, id: string) {
 }
 
 export {ApiError,fail,now,json,str,integer,body,database,stmt,all,first,audit,limit,authenticated,loginSession};
+
+export function transactionGuard(db:D1Database, condition:string, ...values:any[]) {
+    const id=uid();
+    return [stmt(db,`INSERT INTO transaction_guards(id,passed) SELECT ?,CASE WHEN ${condition} THEN 1 ELSE 0 END`,id,...values),stmt(db,'DELETE FROM transaction_guards WHERE id=?',id)];
+}

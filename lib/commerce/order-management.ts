@@ -3,7 +3,7 @@ import {all,first,stmt,now,fail,json,str,body,audit} from './api-common.ts';
 import {transactionGuard} from './customer-api.ts';
 import {uid} from './security.ts';
 import {shipmentDisplay} from './order-display.ts';
-const fields='id,customer_id,shipment_group_id,archived_at,admin_note,revision,contact,recipient,shipping_address,total,subtotal,shipping_fee,order_type,status,demo,shipping_status,tracking_number,shipped_at,payment_method,created_at,expires_at,paid_at,fulfilled_at,payment_provider,payment_ref';
+const fields='contact_email,id,customer_id,shipment_group_id,archived_at,admin_note,revision,contact,recipient,shipping_address,total,subtotal,shipping_fee,order_type,status,demo,shipping_status,tracking_number,shipped_at,payment_method,created_at,expires_at,paid_at,fulfilled_at,payment_provider,payment_ref';
 export async function listOrders(db:D1Database,url:URL) {
     const page=Math.max(1,Math.min(10000,Math.trunc(Number(url.searchParams.get('page')))||1)),q=str(url.searchParams.get('q'),100),status=str(url.searchParams.get('status'),20),shipping=str(url.searchParams.get('shipping'),20),archived=url.searchParams.get('archived')==='1';
     const where=` WHERE order_type='physical' AND ${archived?'archived_at IS NOT NULL':'archived_at IS NULL'} AND (id LIKE ? OR contact LIKE ? OR recipient LIKE ? OR tracking_number LIKE ? OR shipment_group_id LIKE ?) AND (?='' OR status=?) AND (?='' OR CASE WHEN trim(coalesce(tracking_number,'')) IN('','无') THEN 'pending' ELSE 'shipped' END=?)`;
@@ -18,6 +18,7 @@ export async function orderDetail(db:D1Database,id:string) {
         group_orders:o.shipment_group_id?await all(db,'SELECT id,total,status,tracking_number,revision FROM orders WHERE shipment_group_id=? ORDER BY created_at',o.shipment_group_id):[],
         items:await all(db,'SELECT product_id,product_name,price,quantity FROM order_items WHERE order_id=?',id),
         tickets:await all(db,'SELECT * FROM tickets WHERE order_id=? ORDER BY created_at DESC',id),
+        notifications:await all(db,'SELECT event,status,sent_at,last_error FROM order_notifications WHERE order_id=?',id),
         history:await all(db,"SELECT a.id,a.action,a.detail,a.created_at,coalesce(s.username,CASE WHEN a.actor='system' THEN '系统' ELSE '客户 / 系统' END) AS actor_name FROM audits a LEFT JOIN staff s ON s.id=a.actor WHERE a.target=? ORDER BY a.created_at DESC LIMIT 100",id),
         giftAssigned:!!await first(db,'SELECT id FROM telegram_gifts WHERE order_id=?',id)});
 }

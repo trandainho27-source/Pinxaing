@@ -99,7 +99,7 @@ test('competing reservations fail atomically even after both requests read avail
     const { req, db } = await setup();
     const { d: catalog } = await req('catalog');
     const p = catalog.products[0];
-    const create = (id: string) => [db.prepare("INSERT INTO orders(id,lookup_hash,contact,total,status,ready,demo,created_at,expires_at) VALUES(?,'hash','contact',?,'pending',0,1,1,9999999999999)").bind(id, p.price), db.prepare('INSERT INTO order_items VALUES(?,?,?,?,?,1)').bind(id + '-line', id, p.id, p.name, p.price), db.prepare("UPDATE inventory SET status='reserved',order_id=? WHERE id IN(SELECT id FROM inventory WHERE product_id=? AND status='available' LIMIT 1)").bind(id, p.id), ...reservationGuard(db as any, id) as unknown as Query[], db.prepare('UPDATE orders SET ready=1 WHERE id=?').bind(id)];
+    const create = (id: string) => [db.prepare("INSERT INTO orders(id,lookup_hash,contact,total,status,ready,demo,created_at,expires_at) VALUES(?,'hash','contact',?,'pending',0,1,1,9999999999999)").bind(id, p.price), db.prepare('INSERT INTO order_items(id,order_id,product_id,product_name,price,quantity) VALUES(?,?,?,?,?,1)').bind(id + '-line', id, p.id, p.name, p.price), db.prepare("UPDATE inventory SET status='reserved',order_id=? WHERE id IN(SELECT id FROM inventory WHERE product_id=? AND status='available' LIMIT 1)").bind(id, p.id), ...reservationGuard(db as any, id) as unknown as Query[], db.prepare('UPDATE orders SET ready=1 WHERE id=?').bind(id)];
     await db.batch(create('FIRST'));
     await assert.rejects(db.batch(create('SECOND')), /CHECK constraint/);
     assert.equal(db.raw.prepare("SELECT count(*) AS n FROM orders WHERE id='SECOND'").get()!.n, 0);
