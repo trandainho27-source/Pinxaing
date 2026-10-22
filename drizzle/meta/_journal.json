@@ -71,6 +71,13 @@
       "when": 1792546114742,
       "tag": "0009_solid_green_goblin",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1792581869058,
+      "tag": "0010_spotty_ma_gnuci",
+      "breakpoints": true
     }
   ]
 }

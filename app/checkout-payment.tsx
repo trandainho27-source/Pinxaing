@@ -12,7 +12,7 @@ export default function CheckoutPayment({order,secret,csrf,customer,refreshAccou
   setBusy(true);setError('');let paid=false;
   try{await api('customer/wallet/pay',{id:order.id},customer.csrf);paid=true;onUpdate(await api<Order>('orders/lookup',{id:order.id,secret},customer.csrf));await refreshAccount?.();}
   catch(e){setError(paid?'付款已完成，请刷新订单查看最新状态。':(e as Error).message);}finally{setBusy(false);}
- }}>{busy?'正在处理…':`确认余额支付 ${money(order.total)}`}</button><a className="text-button" href="/account">查看余额 / 申请充值</a></div>}
+ }}>{busy?'正在处理…':`确认余额支付 ${money(order.total)}`}</button><a className="text-button" href="/account">查看余额 / 充值</a></div>}
  {!owns&&<p className="hint">余额支付仅限已登录账号名下的订单。游客订单可先在账号中心凭订单号与查询密钥绑定。</p>}
  <div className="reserved-methods">{methods.map(([id,label])=><div className={id===order.payment_method?'selected':''} key={id}><span>{label}{id===order.payment_method&&<Check size={13}/>}</span><small>在线接口待接入</small></div>)}</div><p className="hint">微信、支付宝、USDT 在线付款尚未开通，请先与商家确认其他收款安排。</p>
  {!!order.demo&&order.status==='pending'&&<button className="secondary" disabled={busy} onClick={async()=>{setBusy(true);setError('');try{onUpdate(await api<Order>('orders/demo-pay',{id:order.id,secret},csrf));}catch(e){setError((e as Error).message);}finally{setBusy(false);}}}>{busy?'正在处理…':'模拟确认付款（不扣款）'}</button>}

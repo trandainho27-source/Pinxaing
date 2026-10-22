@@ -98,9 +98,9 @@ node node_modules/wrangler/bin/wrangler.js d1 export DB --remote --config wrangl
 
 ## 本次余额 / 邮件 / 图片 / 免邮升级
 
-自动部署按顺序追加 `0008_nappy_barracuda.sql` 和 `0009_solid_green_goblin.sql`，增加账本、充值、通知、图片元数据与免邮字段。迁移不创建充值余额，不修改原订单费用，不更换密钥。不要清空数据库或重新建立管理员。
+自动部署按顺序追加 `0008_nappy_barracuda.sql` 、`0009_solid_green_goblin.sql` 和 `0010_spotty_ma_gnuci.sql`，增加账本、充值、通知、图片元数据、免邮字段及充值流程 / 有效期 / 到账时间。迁移不创建充值余额，不修改原订单费用，不更换密钥。不要清空数据库或重新建立管理员。
 
-订单邮件复用已有 `RESEND_API_KEY` 与 `EMAIL_FROM`。店主在「订单邮件」查看记录，在「站点设置 → 余额充值指引」填写实际客服 / 收款核实流程。保留每分钟 Cron，通知失败会重试；实际投递需用真实邮箱验收。
+订单邮件复用已有 `RESEND_API_KEY` 与 `EMAIL_FROM`。店主在「订单邮件」查看记录。新充值采用直接付款并核验到账后入账，外部支付适配器尚未实现，正式充值保持未开通。保留每分钟 Cron，通知失败会重试；实际投递需用真实邮箱验收。
 
 ### 本地商品图片上传的正式配置
 

@@ -42,8 +42,13 @@ try{
  await request('admin/shipment',{id:mergeOrders[0],tracking_number:'GROUP-1000'});assert.equal((await customer('orders/lookup',{id:mergeOrders[1]})).tracking_number,'GROUP-1000');
  await request('admin/order-actions',{action:'amend-shipment',id:mergeOrders[1],tracking_number:'GROUP-2000',reason:'运行时测试修正错误物流单号'});assert.equal((await customer('orders/lookup',{id:mergeOrders[0]})).tracking_number,'GROUP-2000');
  await request('admin/order-actions',{action:'clear-shipment',id:mergeOrders[0],reason:'运行时测试撤销发货记录'});assert.equal((await customer('orders/lookup',{id:mergeOrders[1]})).shipping_status,'pending');
- await request('admin/order-actions',{action:'unmerge',id:mergeOrders[0],reason:'运行时测试恢复独立发货'});await customer('customer/logout',{all:true});await customer('customer/orders',undefined,401);
- console.log('workerd demo passed: 5 SSR routes, customer code/session/profile/order access, guest claim, payment-only gift disclosure, combined shipment corrections, recycle bin and stock invariants.');
+ await request('admin/order-actions',{action:'unmerge',id:mergeOrders[0],reason:'运行时测试恢复独立发货'});
+ const recharge=await customer('customer/wallet/recharge',{amount:20000,method:'alipay',request_key:'a'.repeat(64)},201);assert.equal(recharge.flow,'demo');assert.equal((await customer('customer/wallet')).balance,0);
+ await request('admin/wallet',{id:recharge.id,action:'approve',reference:'cannot-review-online',reason:'隔离测试不能人工确认在线充值'},409);
+ await customer('customer/wallet/recharge/demo-pay',{id:recharge.id});assert.equal((await customer('customer/wallet/recharge/demo-pay',{id:recharge.id})).idempotent,true);assert.equal((await customer('customer/wallet')).balance,20000);
+ const balanceOrder=await customer('orders',{acceptedTerms:true,items:[{id:p.id,quantity:1}],payment_method:'balance'},201);await customer('customer/wallet/pay',{id:balanceOrder.id});assert.equal((await customer('customer/wallet')).balance,20000-balanceOrder.total);
+ await customer('customer/logout',{all:true});await customer('customer/orders',undefined,401);
+ console.log('workerd demo passed: 5 SSR routes, customer code/session/profile/order access, guest claim, payment-only gift disclosure, combined shipment corrections, recycle bin and stock invariants, direct demo recharge and balance checkout.');
 }finally{await mf.dispose();}
 const prod=new Miniflare({...options,d1Databases:{DB:'physical-production-test-db'},bindings:{DEMO_MODE:'false',INVENTORY_KEY:'b'.repeat(64),BOOTSTRAP_TOKEN:'worker-test-bootstrap',PAYMENT_PROVIDER:'trc20',TRON_RECEIVING_ADDRESS:'historical-fixture',TRONGRID_API_KEY:'historical-fixture',PAYMENT_WEBHOOK_SECRET:'historical-fixture',DIDIPIFA_API_TOKEN:'historical-fixture',DIDIPIFA_PURCHASE_ENABLED:'true'}});
 try{
@@ -75,18 +80,22 @@ const emailWorker=new Miniflare({...options,d1Databases:{DB:'email-production-te
  emails.push(await request.json());return Response.json({id:'mock-email-only'});
 }});
 try{
- await migrate(emailWorker);const request=client(emailWorker),session=await request('customer/session');assert.equal(session.email_ready,true);assert.equal(session.email_configuration,undefined);const result=await request('customer/email/code',{email:'Runtime@Example.com'});assert.equal(result.demo_code,undefined);assert.equal(emails.length,1);assert.deepEqual(emails[0].to,['runtime@example.com']);
+ const db=await migrate(emailWorker);const request=client(emailWorker),session=await request('customer/session');assert.equal(session.email_ready,true);assert.equal(session.email_configuration,undefined);const result=await request('customer/email/code',{email:'Runtime@Example.com'});assert.equal(result.demo_code,undefined);assert.equal(emails.length,1);assert.deepEqual(emails[0].to,['runtime@example.com']);
  const code=emails[0].text.match(/\d{6}/)[0];await request('customer/email/verify',{challenge_id:result.challenge_id,code});const me=(await request('customer/session')).customer;assert.equal(me.is_demo,0);assert.ok(me.verified_at>0);
  await request('auth/setup',{username:'feature-owner',password:'feature-password-2026',token:'worker-test-bootstrap'});
- await request('admin/categories',{id:'features',name:'功能测试',sort:0,active:true});
+ await request('admin/categories',{id:'features',name:'自定义分类',icon:'text:香',sort:0,active:true});
  const png=Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jXioAAAAASUVORK5CYII=','base64'));
  const image=await request('admin/media/upload',png,201,{'content-type':'image/png'});const imageResponse=await emailWorker.dispatchFetch('https://store.test'+image.url);assert.equal(imageResponse.headers.get('content-type'),'image/png');assert.deepEqual(new Uint8Array(await imageResponse.arrayBuffer()),png);
  const product={category_id:'features',name:'功能测试商品',min_qty:1,max_qty:10,active:true,images:[image.url,'https://images.example/second.png']};
- await request('admin/products',{...product,id:'ordinary',price:3900});await request('admin/products',{...product,id:'other',price:990,shipping_class:'other'});
+ await request('admin/products',{...product,id:'ordinary',price:3900,icon_key:'text:⭐',tag:'自定义标签'});await request('admin/products',{...product,id:'other',price:990,shipping_class:'other'});
  for(const id of ['ordinary','other'])await request('admin/inventory',{product_id:id,delta:5,reason:'隔离测试入库'});
  await request('admin/gifts',{codes:'RUNTIME-GIFT-1 | fixture-only\nRUNTIME-GIFT-2 | fixture-only'});
- assert.equal((await request('admin/products')).media_ready,true);
- const topup=await request('customer/wallet/topup',{amount:20000,method:'wechat',request_key:'f'.repeat(64)},201);assert.equal((await request('customer/wallet')).balance,0);
+ assert.equal((await request('admin/products')).media_ready,true);const catalog=await request('catalog');assert.equal(catalog.categories[0].icon,'text:香');assert.equal(catalog.products.find(p=>p.id==='ordinary').tag,'自定义标签');
+ const input={amount:20000,method:'wechat',request_key:'f'.repeat(64)};
+ await request('customer/wallet/topup',input,410);await request('customer/wallet/recharge',{...input,paid:true},503);await request('customer/wallet/recharge/demo-pay',{id:'forged'},403);
+ assert.equal((await db.prepare('SELECT count(*) AS n FROM wallet_topups').first()).n,0);assert.equal((await request('customer/wallet')).balance,0);
+ // Isolated pre-upgrade fixture: prove existing records and balances survive.
+ const topup={id:'legacy-runtime-only'};await db.prepare('INSERT INTO wallet_topups(id,customer_id,amount,method,request_key,created_at) VALUES(?,?,?,?,?,?)').bind(topup.id,me.id,input.amount,input.method,input.request_key,Date.now()).run();
  const confirm={id:topup.id,action:'approve',reference:'fixture-topup-only',reason:'隔离测试核对，不涉及真实资金'};await request('admin/wallet',confirm);assert.equal((await request('admin/wallet',confirm)).idempotent,true);
  const free=await request('orders',{acceptedTerms:true,items:[{id:'other',quantity:1}],contact_email:'runtime@example.com',payment_method:'balance'},201);assert.equal(free.shipping_fee,0);assert.equal(free.total,990);assert.equal(free.telegram_gift,null);
  await request('customer/wallet/pay',{id:free.id});assert.equal((await request('customer/wallet/pay',{id:free.id})).idempotent,true);const paid=await request('orders/lookup',{id:free.id});assert.equal(paid.telegram_gift_unlocked,true);assert.equal(paid.shipping_status,'pending');assert.equal((await request('customer/wallet')).balance,19010);
@@ -97,5 +106,5 @@ try{
  const ledger=(await request('customer/wallet')).ledger;assert.equal(ledger.length,3);assert.equal(ledger.reduce((sum,l)=>sum+l.delta,0),20000);
  await (await emailWorker.getWorker()).scheduled({cron:'* * * * *'});assert.equal(emails.length,5);
  await request('customer/logout',{all:true});await request('customer/orders',undefined,401);
- console.log('workerd upgrade passed: email login, R2 upload and image retrieval, free and mixed shipping, topup approval, balance purchase/refund, notification outbox, and ledger totals. Mock email provider only; no real emails or funds.');
+ console.log('workerd upgrade passed: email login, R2 upload and image retrieval, free and mixed shipping, formal recharge disabled, legacy topup compatibility, balance purchase/refund, notification outbox, and ledger totals. Mock email provider only; no real emails or funds.');
 }finally{await emailWorker.dispose();}

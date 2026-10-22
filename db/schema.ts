@@ -98,6 +98,7 @@ export const walletAccounts = sqliteTable('wallet_accounts', {
     balance: integer('balance').notNull().default(0), updatedAt: integer('updated_at').notNull(),
 }, t => [check('wallet_balance_range',sql`${t.balance} >= 0 AND ${t.balance} <= 100000000 AND typeof(${t.balance}) = 'integer'`)]);
 export const walletTopups = sqliteTable('wallet_topups', {
+    flow: text('flow').notNull().default('manual'), expiresAt: integer('expires_at'), paidAt: integer('paid_at'),
     id: text('id').primaryKey(), customerId: text('customer_id').notNull().references(() => customers.id),
     amount: integer('amount').notNull(), method: text('method').notNull(), status: text('status').notNull().default('pending'),
     requestKey: text('request_key').notNull(), note: text('note').notNull().default(''), reference: text('reference'),

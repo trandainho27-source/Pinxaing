@@ -14,6 +14,7 @@ import {adminWallet} from './wallet.ts';
 import {queueOrderEmail,deliverOrderEmails,notificationAdmin} from './order-notifications.ts';
 import {validateImages,uploadMedia,serveMedia} from './media.ts';
 import {productImages} from './product-images.ts';
+import {validCatalogIcon} from './catalog-icons.ts';
 export const SHIPPING_FEE = 2000;
 const GIFT_CONTEXT = 'pinxiang-telegram-gift';
 const formalStaff = "NOT (id='demo-owner' AND username='demo' AND role='owner')";
@@ -34,7 +35,7 @@ function releaseStock(db:D1Database) {
     stmt(db,`UPDATE physical_reservations SET status='released' WHERE status='reserved' AND order_id IN(SELECT id FROM orders WHERE status IN('expired','cancelled'))`)];
 }
 async function expire(db:D1Database) {
-    await db.batch([stmt(db,"UPDATE orders SET status='expired',revision=revision+1 WHERE status='pending' AND expires_at<?",now()),...releaseStock(db),stmt(db,"UPDATE inventory SET status='available',order_id=NULL WHERE status='reserved' AND order_id IN(SELECT id FROM orders WHERE status IN('expired','cancelled'))"),stmt(db,'DELETE FROM sessions WHERE expires_at<?',now()),stmt(db,'DELETE FROM rate_limits WHERE reset_at<?',now()),stmt(db,'DELETE FROM customer_sessions WHERE expires_at<?',now()),stmt(db,'DELETE FROM email_challenges WHERE created_at<?',now()-86400000)]);
+    await db.batch([stmt(db,"UPDATE wallet_topups SET status='expired' WHERE flow IN('online','demo') AND status='pending' AND expires_at<?",now()),stmt(db,"UPDATE orders SET status='expired',revision=revision+1 WHERE status='pending' AND expires_at<?",now()),...releaseStock(db),stmt(db,"UPDATE inventory SET status='available',order_id=NULL WHERE status='reserved' AND order_id IN(SELECT id FROM orders WHERE status IN('expired','cancelled'))"),stmt(db,'DELETE FROM sessions WHERE expires_at<?',now()),stmt(db,'DELETE FROM rate_limits WHERE reset_at<?',now()),stmt(db,'DELETE FROM customer_sessions WHERE expires_at<?',now()),stmt(db,'DELETE FROM email_challenges WHERE created_at<?',now()-86400000)]);
 }
 async function settings(db:D1Database) {return Object.fromEntries((await all(db,'SELECT * FROM settings')).map(x=>[x.key,x.value]));}
 async function refreshDemoGiftCopy(db:D1Database) {
@@ -64,7 +65,7 @@ async function seed(db:D1Database,env:RuntimeEnv,actor:string) {
         const content=`DEMO-TELEGRAM-${String(n).padStart(3,'0')} | 仅用于界面演示，不能登录 Telegram`;
         st.push(stmt(db,`INSERT OR IGNORE INTO telegram_gifts(id,ciphertext,fingerprint,status,is_example,created_at) VALUES(?,?,?,'available',1,?)`,uid(),await encrypt(content,env.INVENTORY_KEY!,GIFT_CONTEXT),await sha('demo-gift-'+n),ts));
     }
-    const defaults={brand:'品香',tagline:'精选日常好物，让生活多一点喜欢。',announcement:'普通实体商品每单邮费 ¥20，仅购买其他商品免邮；地址和联系方式可留空，付款后显示赠送的加密通讯账号。',support:'付款后可使用订单中的赠送账号联系客服；付款前后均可提交订单工单。',telegramSupport:'',businessHours:'工作日 09:00–18:00',footer:'日常好物，自助选购',terms:'本商城售卖实体商品。含普通商品的订单收取 20 元邮费，不可取消；仅购买其他商品免邮，混合下单只收一次邮费。地址和联系方式可留空，发货前请通过客服补充。每单赠送一个加密通讯账号用于联系客服和售后，付款成功后才显示账号内容。已展示的赠送账号不会因取消订单而回收。退款与退换货请联系商家。',privacy:'收货地址和联系方式均可选填，仅用于订单配送与售后。订单密钥用于访问订单和赠送账号，请妥善保存。'};
+    const defaults={brand:'品香',tagline:'按需选购，便捷下单。',announcement:'普通实体商品每单邮费 ¥20，仅购买其他商品免邮；地址和联系方式可留空，付款后显示赠送的加密通讯账号。',support:'付款后可使用订单中的赠送账号联系客服；付款前后均可提交订单工单。',telegramSupport:'',businessHours:'工作日 09:00–18:00',footer:'精选商品，自助选购',terms:'本商城售卖实体商品。含普通商品的订单收取 20 元邮费，不可取消；仅购买其他商品免邮，混合下单只收一次邮费。地址和联系方式可留空，发货前请通过客服补充。每单赠送一个加密通讯账号用于联系客服和售后，付款成功后才显示账号内容。已展示的赠送账号不会因取消订单而回收。退款与退换货请联系商家。',privacy:'收货地址和联系方式均可选填，仅用于订单配送与售后。订单密钥用于访问订单和赠送账号，请妥善保存。'};
     // These old spellings are comparison-only values for existing default settings.
     const oldDefaults:Record<string,string>={brand:'品享',tagline:'好工具，好灵感，好好享受数字生活。',announcement:'欢迎体验品享。这是独立演示商城，示例商品用于体验购买与交付，不收取真实款项。',footer:'数字商品交付平台',terms:'购买前请确认商品说明、适用地区及使用条件。数字商品交付后，如有质量问题请凭订单号提交售后工单。',support:'请通过订单页面提交售后工单',privacy:'仅收集履行订单必需的联系信息。查询密钥用于验证订单访问权限。联系信息仅供客服处理订单使用。'};
     for(const [key,value] of Object.entries(defaults))st.push(stmt(db,`INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE settings.value IN (?,?)`,key,value,oldDefaults[key]??value,(oldDefaults[key]??value).replaceAll('品享','品香')));
@@ -79,8 +80,16 @@ async function refreshShippingCopy(db:D1Database) {
     ];
     await db.batch([...replacements.map(([key,old,value])=>stmt(db,'UPDATE settings SET value=? WHERE key=? AND value=?',value,key,old)),stmt(db,"INSERT OR IGNORE INTO settings VALUES('shipping_copy_v3','1')")]);
 }
+async function refreshGenericCopy(db:D1Database) {
+    if(await first(db,"SELECT key FROM settings WHERE key='generic_catalog_copy_v4'"))return;
+    await db.batch([
+        stmt(db,"UPDATE settings SET value='按需选购，便捷下单。' WHERE key='tagline' AND value='精选日常好物，让生活多一点喜欢。'"),
+        stmt(db,"UPDATE settings SET value='精选商品，自助选购' WHERE key='footer' AND value='日常好物，自助选购'"),
+        stmt(db,"INSERT OR IGNORE INTO settings VALUES('generic_catalog_copy_v4','1')")
+    ]);
+}
 async function catalog(db:D1Database,env:RuntimeEnv){
-    if(env.DEMO_MODE==='true')await seed(db,env,'system');await refreshShippingCopy(db);await expire(db);
+    if(env.DEMO_MODE==='true')await seed(db,env,'system');await refreshShippingCopy(db);await refreshGenericCopy(db);await expire(db);
     return {products:await all(db,productQuery+` WHERE p.product_type='physical' AND p.active=1 ${env.DEMO_MODE==='true'?'':'AND p.is_example=0'} AND p.category_id IN(SELECT id FROM categories WHERE active=1) ORDER BY p.featured DESC,p.created_at DESC`),categories:await all(db,`SELECT * FROM categories c WHERE c.active=1 AND EXISTS(SELECT 1 FROM products p WHERE p.category_id=c.id AND p.product_type='physical' AND p.active=1 ${env.DEMO_MODE==='true'?'':'AND p.is_example=0'}) ORDER BY c.sort`),settings:await settings(db),demo:env.DEMO_MODE==='true',paymentEnabled:false,paymentMethods,shippingFee:SHIPPING_FEE,giftAvailable:!!await first(db,"SELECT id FROM telegram_gifts WHERE status='available' AND is_example=? LIMIT 1",env.DEMO_MODE==='true'?1:0)};
 }
 async function lookup(db:D1Database,env:RuntimeEnv,id:string,secret:string,customer?:Customer|null):Promise<any>{
@@ -239,12 +248,12 @@ export async function handleApi(request:Request,env:RuntimeEnv):Promise<Response
                 const images=await validateImages(db,b.images===undefined?(b.image_url===undefined?productImages(existingProduct||{}):[b.image_url]):b.images),imageUrl=images[0]||'',shippingClass=b.shipping_class??existingProduct?.shipping_class??'standard';
                 if(!['standard','other'].includes(shippingClass))fail(400,'请选择普通实体商品或其他商品');
                 if(!name||!await first(db,'SELECT id FROM categories WHERE id=?',category))fail(400,'商品名称或分类无效');if(await first(db,"SELECT id FROM products WHERE id=? AND product_type!='physical'",id))fail(409,'历史数字商品不能直接转为实体商品');
-                const price=integer(b.price,1,10000000),min=integer(b.min_qty,1,100),max=integer(b.max_qty,min,100),iconKey=str(b.icon_key,20);
-                if(!['','cup','bottle','bag','lamp','notebook','desk','home','outdoor','umbrella','box'].includes(iconKey))fail(400,'请选择有效的实体商品图标');
+                const price=integer(b.price,1,10000000),min=integer(b.min_qty,1,100),max=integer(b.max_qty,min,100),iconKey=b.icon_key===undefined?(existingProduct?.icon_key||'box'):b.icon_key;
+                if(!validCatalogIcon(iconKey))fail(400,'请选择有效图标，或填写最多 8 个字符的自定义标识');
                 await db.batch([stmt(db,`INSERT INTO products(id,category_id,name,subtitle,description,instructions,price,compare_price,min_qty,max_qty,featured,active,region,tag,is_example,created_at,product_type,icon_key,image_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,'physical',?,?) ON CONFLICT(id) DO UPDATE SET category_id=excluded.category_id,name=excluded.name,subtitle=excluded.subtitle,description=excluded.description,instructions=excluded.instructions,price=excluded.price,compare_price=excluded.compare_price,min_qty=excluded.min_qty,max_qty=excluded.max_qty,featured=excluded.featured,active=excluded.active,region=excluded.region,tag=excluded.tag,icon_key=excluded.icon_key,image_url=excluded.image_url`,id,category,name,str(b.subtitle,150),str(b.description,4000),str(b.instructions,4000),price,integer(b.compare_price||0,0,10000000),min,max,b.featured?1:0,b.active?1:0,str(b.region,30),str(b.tag,30),now(),iconKey,imageUrl),stmt(db,'UPDATE products SET images_json=?,shipping_class=? WHERE id=?',JSON.stringify(images),shippingClass,id),stmt(db,'INSERT OR IGNORE INTO physical_stock(product_id) VALUES(?)',id),audit(db,p.id,'product.save',id,name)]);return json({ok:true,id});
             }
             if(section==='categories'&&method==='GET')return json(await all(db,categoryQuery));
-            if(section==='categories'&&method==='POST'){const b=await body(request),id=str(b.id,64)||uid(),name=str(b.name,50);if(!name)fail(400,'请输入分类名称');await db.batch([stmt(db,'INSERT INTO categories VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,icon=excluded.icon,sort=excluded.sort,active=excluded.active',id,name,str(b.icon,20)||'box',integer(b.sort||0,0,1000),b.active?1:0),audit(db,p.id,'category.save',id,name)]);return json({ok:true});}
+            if(section==='categories'&&method==='POST'){const b=await body(request),id=str(b.id,64)||uid(),name=str(b.name,50);if(!name)fail(400,'请输入分类名称');const icon=b.icon??'box';if(!validCatalogIcon(icon))fail(400,'分类图标无效，自定义标识最多 8 个字符');await db.batch([stmt(db,'INSERT INTO categories VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,icon=excluded.icon,sort=excluded.sort,active=excluded.active',id,name,icon||'box',integer(b.sort||0,0,1000),b.active?1:0),audit(db,p.id,'category.save',id,name)]);return json({ok:true});}
             if(section==='inventory'&&method==='GET')return json({products:await all(db,productQuery+" WHERE p.product_type='physical'")});
             if(section==='inventory'&&method==='POST'){
                 const b=await body(request),id=str(b.product_id,64),delta=integer(b.delta,-100000,100000),reason=str(b.reason,300);if(!delta||reason.length<2)fail(400,'请填写调整数量及原因');if(!await first(db,"SELECT product_id FROM physical_stock WHERE product_id=?",id))fail(404,'实体商品不存在');
@@ -285,7 +294,7 @@ export async function handleApi(request:Request,env:RuntimeEnv):Promise<Response
             if(section==='tickets'&&method==='GET')return json(await all(db,'SELECT * FROM tickets ORDER BY created_at DESC LIMIT 200'));
             if(section==='tickets'&&method==='POST'){const b=await body(request),id=str(b.id,64),reply=str(b.reply,2000);if(!reply)fail(400,'请输入回复内容');if(!await first(db,'SELECT id FROM tickets WHERE id=?',id))fail(404,'工单不存在');await db.batch([stmt(db,'UPDATE tickets SET reply=?,status=?,updated_at=? WHERE id=?',reply,b.closed?'closed':'open',now(),id),audit(db,p.id,'ticket.reply',id)]);return json({ok:true});}
             if(section==='settings'&&method==='GET')return json(await settings(db));
-            if(section==='settings'&&method==='POST'){const b=await body(request),keys=['brand','tagline','announcement','support','telegramSupport','businessHours','footer','terms','privacy','rechargeInstructions'];const username=str(b.telegramSupport,40).replace(/^@/,'');if(b.telegramSupport&& !/^[A-Za-z0-9_]{5,32}$/.test(username))fail(400,'Telegram 客服用户名需为 5–32 位字母、数字或下划线');const st=keys.filter(k=>typeof b[k]==='string').map(k=>stmt(db,'INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',k,k==='telegramSupport'?username:str(b[k],4000)));await db.batch([...st,audit(db,p.id,'settings.save','site')]);return json({ok:true});}
+            if(section==='settings'&&method==='POST'){const b=await body(request),keys=['brand','tagline','announcement','support','telegramSupport','businessHours','footer','terms','privacy','heroTitle','catalogTitle','otherCategoryLabel'];const username=str(b.telegramSupport,40).replace(/^@/,'');if(b.telegramSupport&& !/^[A-Za-z0-9_]{5,32}$/.test(username))fail(400,'Telegram 客服用户名需为 5–32 位字母、数字或下划线');const st=keys.filter(k=>typeof b[k]==='string').map(k=>stmt(db,'INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',k,k==='telegramSupport'?username:str(b[k],['heroTitle','catalogTitle','otherCategoryLabel'].includes(k)?40:4000)));await db.batch([...st,audit(db,p.id,'settings.save','site')]);return json({ok:true});}
             if (section === 'staff' && method === 'GET')
                 return json(await all(db, 'SELECT id,username,role,active,created_at FROM staff'));
             if (section === 'staff' && method === 'POST') {

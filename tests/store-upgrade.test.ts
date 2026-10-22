@@ -6,9 +6,14 @@ import {deliverOrderEmails} from '../lib/commerce/order-notifications.ts';
 const reason='测试核实到账，不涉及真实资金';
 const key=()=>crypto.randomUUID().replaceAll('-','').repeat(2);
 async function account(){const s=await fixture(),buyer=client(s.env),customer=await login(buyer);return {...s,buyer,customer};}
+// Historical records are inserted only into this isolated fixture: the public
+// manual application route is retired. Existing records still need safe handling.
+function legacyTopup(s:any,amount:number){
+ const id='legacy-'+crypto.randomUUID();s.db.raw.prepare('INSERT INTO wallet_topups(id,customer_id,amount,method,request_key,created_at) VALUES(?,?,?,?,?,?)').run(id,s.customer.id,amount,'alipay',key(),Date.now());return {id};
+}
 async function fund(s:any,amount:number,reference=key()){
- const topup=await s.buyer('customer/wallet/topup',{amount,method:'alipay',request_key:key()});assert.equal(topup.r.status,201,JSON.stringify(topup.d));
- const result=await s.admin('admin/wallet',{id:topup.d.id,action:'approve',reference,reason});assert.equal(result.r.status,200,JSON.stringify(result.d));return topup.d.id;
+ const topup=legacyTopup(s,amount);
+ const result=await s.admin('admin/wallet',{id:topup.id,action:'approve',reference,reason});assert.equal(result.r.status,200,JSON.stringify(result.d));return topup.id;
 }
 async function production(){const s=await fixture();s.env.DEMO_MODE='false';s.db.raw.exec("UPDATE products SET is_example=0; UPDATE telegram_gifts SET is_example=0; UPDATE staff SET username='real-test-owner' WHERE id='demo-owner'");return s;}
 
@@ -31,21 +36,19 @@ test('shipping changes during checkout roll back the reservation and order atomi
  assert.equal((await s.guest('orders',cart(s.p.id))).r.status,409);
  assert.equal(row(s,'SELECT count(*) AS n FROM orders').n,0);assert.equal(row(s,'SELECT available FROM physical_stock WHERE product_id=?',s.p.id).available,20);assert.equal(row(s,"SELECT count(*) AS n FROM telegram_gifts WHERE status='assigned'").n,0);
 });
-test('topups are pending, owner-reviewed, idempotent, and reject reused payment receipts',async()=>{
- const s=await account(),payload={amount:10000,method:'wechat',request_key:key()};
- const t=await s.buyer('customer/wallet/topup',payload);assert.equal(t.r.status,201);assert.equal((await s.buyer('customer/wallet')).d.balance,0);
- assert.equal((await s.buyer('customer/wallet/topup',payload)).d.id,t.d.id);assert.equal((await s.buyer('customer/wallet/topup',{...payload,amount:20000})).r.status,409);
+test('historical manual topups remain reviewable and cannot reuse payment receipts',async()=>{
+ const s=await account(),t={d:legacyTopup(s,10000)};assert.equal((await s.buyer('customer/wallet')).d.balance,0);
  const approval={id:t.d.id,action:'approve',reference:'Receipt-001',reason};
  const race=await Promise.all([s.admin('admin/wallet',approval),s.admin('admin/wallet',approval)]);assert.ok(race.some(x=>x.r.status===200));assert.ok(race.every(x=>[200,409].includes(x.r.status)));
  assert.equal((await s.admin('admin/wallet',approval)).d.idempotent,true);assert.equal((await s.buyer('customer/wallet')).d.balance,10000);assert.equal(row(s,'SELECT count(*) AS n FROM wallet_ledger').n,1);
- const t2=(await s.buyer('customer/wallet/topup',{...payload,request_key:key()})).d;
+ const t2=legacyTopup(s,10000);
  assert.equal((await s.admin('admin/wallet',{...approval,id:t2.id,reference:'receipt-001'})).r.status,409);assert.equal(row(s,'SELECT status FROM wallet_topups WHERE id=?',t2.id).status,'pending');assert.equal((await s.buyer('customer/wallet')).d.balance,10000);
  const overview=(await s.admin('admin/wallet?status=approved')).d;assert.equal(overview.total,1);assert.equal(overview.stats.total_balance,10000);
 });
 test('wallet requires active authenticated ownership, CSRF, owner approval and valid integer amounts',async()=>{
  const s=await account();assert.equal((await s.guest('customer/wallet')).r.status,401);
- assert.equal((await s.buyer('customer/wallet/topup',{amount:100,method:'wechat',request_key:key()},{'x-csrf-token':'bad'})).r.status,403);
- for(const amount of [0,-100,99,100.5,1000001,'100'])assert.equal((await s.buyer('customer/wallet/topup',{amount,method:'alipay',request_key:key()})).r.status,400);
+ assert.equal((await s.buyer('customer/wallet/recharge',{amount:100,method:'wechat',request_key:key()},{'x-csrf-token':'bad'})).r.status,403);
+ for(const amount of [0,-100,99,100.5,1000001,'100'])assert.equal((await s.buyer('customer/wallet/recharge',{amount,method:'alipay',request_key:key()})).r.status,400);
  const id=await fund(s,10000);await s.admin('admin/staff',{username:'wallet-operator',password:'operator-password-2026',role:'operator'});const operator=client(s.env);await operator('auth/login',{username:'wallet-operator',password:'operator-password-2026'});
  assert.equal((await operator('admin/wallet')).r.status,403);assert.equal((await operator('admin/wallet',{id,action:'approve',reference:'x',reason})).r.status,403);
  const other=client(s.env);await login(other);const order=(await s.buyer('orders',cart(s.p.id))).d;
@@ -53,7 +56,7 @@ test('wallet requires active authenticated ownership, CSRF, owner approval and v
  await s.admin('admin/customers',{id:s.customer.id,active:false,reason});assert.equal((await s.buyer('customer/wallet')).r.status,401);
 });
 test('cancelled and rejected topups cannot be credited; approval/cancel race has one outcome',async()=>{
- const s=await account(),make=async()=>(await s.buyer('customer/wallet/topup',{amount:1000,method:'usdt',request_key:key()})).d.id;
+ const s=await account(),make=async()=>legacyTopup(s,1000).id;
  const first=await make();await s.buyer('customer/wallet/cancel',{id:first});assert.equal((await s.admin('admin/wallet',{id:first,action:'approve',reference:key(),reason})).r.status,409);
  const second=await make();await s.admin('admin/wallet',{id:second,action:'reject',reason});assert.equal((await s.admin('admin/wallet',{id:second,action:'approve',reference:key(),reason})).r.status,409);
  const third=await make();await Promise.all([s.admin('admin/wallet',{id:third,action:'approve',reference:key(),reason}),s.buyer('customer/wallet/cancel',{id:third})]);
@@ -62,7 +65,7 @@ test('cancelled and rejected topups cannot be credited; approval/cancel race has
 test('one external receipt cannot fund both a topup and an ordinary order',async()=>{
  const s=await account(),o=(await s.buyer('orders',cart(s.p.id))).d;await fund(s,10000,'SHARED-RECEIPT');
  assert.equal((await s.admin('admin/orders',{id:o.id,reference:'shared-receipt',reason})).r.status,409);assert.equal(row(s,'SELECT status FROM orders WHERE id=?',o.id).status,'pending');
- await s.admin('admin/orders',{id:o.id,reference:'ORDER-RECEIPT',reason});const t=(await s.buyer('customer/wallet/topup',{amount:10000,method:'wechat',request_key:key()})).d;
+ await s.admin('admin/orders',{id:o.id,reference:'ORDER-RECEIPT',reason});const t=legacyTopup(s,10000);
  assert.equal((await s.admin('admin/wallet',{id:t.id,action:'approve',reference:'order-receipt',reason})).r.status,409);assert.equal((await s.buyer('customer/wallet')).d.balance,10000);
 });
 test('balance debit and ledger roll back when reserved stock cannot be committed',async()=>{

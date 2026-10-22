@@ -17,7 +17,6 @@ const managedLinux = readExecutionProfile() === "managed-linux";
 const localBindingConfig = {
   name: "pinxiang-commerce",
   main: "./build/sites-worker.ts",
-  compatibility_flags: ["nodejs_compat"],
   d1_databases: d1
     ? [
         {

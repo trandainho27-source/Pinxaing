@@ -13,3 +13,6 @@
 - For changes to transactions or permissions run npm test and npm run verify:worker after building; run npm run typecheck for TypeScript edits.
 - Preserve Sites integration and existing project_id. The target Cloudflare deployment and private Sites environment use separate databases and secrets.
 - Record real limitations honestly in docs/VALIDATION.md. Passing unit tests is not a production certification.
+
+- Categories, product tags and display icons are merchant-configurable and independent of shipping_class. Product images take priority over icons; featured products retain custom tags. Preserve merchant data and custom copy.
+- New recharge requires direct payment, no application/reporting or manual approval. Production remains unavailable until verified provider adapters exist. Only server-verified receipts may credit balance atomically and once; demo payment requires both DEMO_MODE and a demo customer. Keep existing manual records reviewable without allowing new manual applications.
